@@ -30,3 +30,6 @@ Thumbs.db
 docs/*
 !docs/ui-ux/
 !docs/ui-ux/**
+
+# Node.js dependencies (if applicable)
+node_modules/
