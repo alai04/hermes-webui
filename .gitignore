@@ -33,3 +33,4 @@ docs/*
 
 # Node.js dependencies (if applicable)
 node_modules/
+dist/
