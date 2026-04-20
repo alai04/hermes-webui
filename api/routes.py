@@ -283,6 +283,15 @@ _LOGIN_LOCALE = {
         "invalid_pw": "Ung\u00fcltiges Passwort",
         "conn_failed": "Verbindung fehlgeschlagen",
     },
+    "ru": {
+        "lang": "ru-RU",
+        "title": "\u0412\u043e\u0439\u0442\u0438",
+        "subtitle": "\u0412\u0432\u0435\u0434\u0438\u0442\u0435 \u043f\u0430\u0440\u043e\u043b\u044c, \u0447\u0442\u043e\u0431\u044b \u043f\u0440\u043e\u0434\u043e\u043b\u0436\u0438\u0442\u044c",
+        "placeholder": "\u041f\u0430\u0440\u043e\u043b\u044c",
+        "btn": "\u0412\u043e\u0439\u0442\u0438",
+        "invalid_pw": "\u041d\u0435\u0432\u0435\u0440\u043d\u044b\u0439 \u043f\u0430\u0440\u043e\u043b\u044c",
+        "conn_failed": "\u041d\u0435 \u0443\u0434\u0430\u043b\u043e\u0441\u044c \u043f\u043e\u0434\u043a\u043b\u044e\u0447\u0438\u0442\u044c\u0441\u044f",
+    },
     "zh": {
         "lang": "zh-CN",
         "title": "\u767b\u5f55",
@@ -509,6 +518,26 @@ def handle_get(handler, parsed) -> bool:
                 return j(handler, {"session": redact_session_data(sess)})
             return bad(handler, "Session not found", 404)
 
+    if parsed.path == "/api/session/status":
+        sid = parse_qs(parsed.query).get("session_id", [""])[0]
+        if not sid:
+            return bad(handler, "Missing session_id")
+        try:
+            from api.session_ops import session_status
+            return j(handler, session_status(sid))
+        except KeyError:
+            return bad(handler, "Session not found", 404)
+
+    if parsed.path == "/api/session/usage":
+        sid = parse_qs(parsed.query).get("session_id", [""])[0]
+        if not sid:
+            return bad(handler, "Missing session_id")
+        try:
+            from api.session_ops import session_usage
+            return j(handler, session_usage(sid))
+        except KeyError:
+            return bad(handler, "Session not found", 404)
+
     if parsed.path == "/api/sessions":
         webui_sessions = all_sessions()
         settings = load_settings()
@@ -580,6 +609,10 @@ def handle_get(handler, parsed) -> bool:
 
         info = git_info_for_workspace(Path(s.workspace))
         return j(handler, {"git": info})
+
+    if parsed.path == "/api/commands":
+        from api.commands import list_commands
+        return j(handler, {"commands": list_commands()})
 
     if parsed.path == "/api/updates/check":
         settings = load_settings()
@@ -915,6 +948,34 @@ def handle_post(handler, parsed) -> bool:
 
     if parsed.path == "/api/session/compress":
         return _handle_session_compress(handler, body)
+
+    if parsed.path == "/api/session/retry":
+        try:
+            require(body, "session_id")
+        except ValueError as e:
+            return bad(handler, str(e))
+        try:
+            from api.session_ops import retry_last
+            result = retry_last(body["session_id"])
+            return j(handler, {"ok": True, **result})
+        except KeyError:
+            return bad(handler, "Session not found", 404)
+        except ValueError as e:
+            return j(handler, {"error": str(e)})
+
+    if parsed.path == "/api/session/undo":
+        try:
+            require(body, "session_id")
+        except ValueError as e:
+            return bad(handler, str(e))
+        try:
+            from api.session_ops import undo_last
+            result = undo_last(body["session_id"])
+            return j(handler, {"ok": True, **result})
+        except KeyError:
+            return bad(handler, "Session not found", 404)
+        except ValueError as e:
+            return j(handler, {"error": str(e)})
 
     if parsed.path == "/api/chat/start":
         return _handle_chat_start(handler, body)
@@ -2817,9 +2878,17 @@ def _handle_session_import_cli(handler, body):
 
     sid = str(body["session_id"])
 
-    # Check if already imported — idempotent
+    # Check if already imported — refresh messages from CLI store if new ones arrived
     existing = Session.load(sid)
     if existing:
+        fresh_msgs = get_cli_session_messages(sid)
+        if fresh_msgs and len(fresh_msgs) > len(existing.messages):
+            # Prefix-equality guard: only extend if existing messages are a prefix of
+            # the fresh CLI messages. Prevents silently dropping WebUI-added messages
+            # on hybrid sessions (user sent messages via WebUI while CLI continued).
+            if existing.messages == fresh_msgs[:len(existing.messages)]:
+                existing.messages = fresh_msgs
+                existing.save(touch_updated_at=False)
         return j(
             handler,
             {

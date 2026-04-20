@@ -198,7 +198,7 @@ def reload_config() -> None:
             import yaml as _yaml
 
             if config_path.exists():
-                loaded = _yaml.safe_load(config_path.read_text())
+                loaded = _yaml.safe_load(config_path.read_text(encoding="utf-8"))
                 if isinstance(loaded, dict):
                     _cfg_cache.update(loaded)
                     try:
@@ -436,9 +436,12 @@ _FALLBACK_MODELS = [
     {"provider": "Anthropic", "id": "anthropic/claude-sonnet-4.6",        "label": "Claude Sonnet 4.6"},
     {"provider": "Anthropic", "id": "anthropic/claude-sonnet-4-5",        "label": "Claude Sonnet 4.5"},
     {"provider": "Anthropic", "id": "anthropic/claude-haiku-4-5",         "label": "Claude Haiku 4.5"},
-    # Google
-    {"provider": "Google",    "id": "google/gemini-3.1-pro-preview",              "label": "Gemini 3.1 Pro Preview"},
-    {"provider": "Google",    "id": "google/gemini-3-flash-preview",              "label": "Gemini 3 Flash Preview"},
+    # Google — 3.x (latest preview) + 2.5 (stable GA)
+    {"provider": "Google",    "id": "google/gemini-3.1-pro-preview",            "label": "Gemini 3.1 Pro Preview"},
+    {"provider": "Google",    "id": "google/gemini-3-flash-preview",            "label": "Gemini 3 Flash Preview"},
+    {"provider": "Google",    "id": "google/gemini-3.1-flash-lite-preview",     "label": "Gemini 3.1 Flash Lite Preview"},
+    {"provider": "Google",    "id": "google/gemini-2.5-pro",                    "label": "Gemini 2.5 Pro"},
+    {"provider": "Google",    "id": "google/gemini-2.5-flash",                  "label": "Gemini 2.5 Flash"},
     # DeepSeek
     {"provider": "DeepSeek",  "id": "deepseek/deepseek-chat-v3-0324",     "label": "DeepSeek V3"},
     {"provider": "DeepSeek",  "id": "deepseek/deepseek-r1",               "label": "DeepSeek R1"},
@@ -501,8 +504,11 @@ _PROVIDER_MODELS = {
         {"id": "codex-mini-latest", "label": "Codex Mini (latest)"},
     ],
     "google": [
-        {"id": "gemini-3.1-pro-preview",   "label": "Gemini 3.1 Pro Preview"},
-        {"id": "gemini-3-flash-preview", "label": "Gemini 3 Flash Preview"},
+        {"id": "gemini-3.1-pro-preview",            "label": "Gemini 3.1 Pro Preview"},
+        {"id": "gemini-3-flash-preview",            "label": "Gemini 3 Flash Preview"},
+        {"id": "gemini-3.1-flash-lite-preview",     "label": "Gemini 3.1 Flash Lite Preview"},
+        {"id": "gemini-2.5-pro",                    "label": "Gemini 2.5 Pro"},
+        {"id": "gemini-2.5-flash",                  "label": "Gemini 2.5 Flash"},
     ],
     "deepseek": [
         {"id": "deepseek-chat-v3-0324", "label": "DeepSeek V3"},
@@ -542,7 +548,7 @@ _PROVIDER_MODELS = {
         {"id": "gpt-4o", "label": "GPT-4o"},
         {"id": "claude-opus-4.6", "label": "Claude Opus 4.6"},
         {"id": "claude-sonnet-4.6", "label": "Claude Sonnet 4.6"},
-        {"id": "gemini-3.1-pro-preview", "label": "Gemini 3.1 Pro Preview"},
+        {"id": "gemini-3-flash-preview", "label": "Gemini 3 Flash Preview"},
     ],
     # OpenCode Zen — curated models via opencode.ai/zen (pay-as-you-go credits)
     "opencode-zen": [
@@ -571,6 +577,9 @@ _PROVIDER_MODELS = {
         {"id": "claude-3-5-haiku", "label": "Claude 3.5 Haiku"},
         {"id": "gemini-3.1-pro-preview", "label": "Gemini 3.1 Pro Preview"},
         {"id": "gemini-3-flash-preview", "label": "Gemini 3 Flash Preview"},
+        {"id": "gemini-3.1-flash-lite-preview", "label": "Gemini 3.1 Flash Lite Preview"},
+        {"id": "gemini-2.5-pro", "label": "Gemini 2.5 Pro"},
+        {"id": "gemini-2.5-flash", "label": "Gemini 2.5 Flash"},
         {"id": "glm-5.1", "label": "GLM-5.1"},
         {"id": "glm-5", "label": "GLM-5"},
         {"id": "kimi-k2.5", "label": "Kimi K2.5"},
@@ -590,9 +599,14 @@ _PROVIDER_MODELS = {
         {"id": "minimax-m2.5", "label": "MiniMax M2.5"},
     ],
     # 'gemini' is the hermes_cli provider ID for Google AI Studio
+    # Model IDs are bare — sent directly to:
+    #   https://generativelanguage.googleapis.com/v1beta/openai/chat/completions
     "gemini": [
-        {"id": "gemini-3.1-pro-preview", "label": "Gemini 3.1 Pro Preview"},
-        {"id": "gemini-3-flash-preview", "label": "Gemini 3 Flash Preview"},
+        {"id": "gemini-3.1-pro-preview",            "label": "Gemini 3.1 Pro Preview"},
+        {"id": "gemini-3-flash-preview",            "label": "Gemini 3 Flash Preview"},
+        {"id": "gemini-3.1-flash-lite-preview",     "label": "Gemini 3.1 Flash Lite Preview"},
+        {"id": "gemini-2.5-pro",                    "label": "Gemini 2.5 Pro"},
+        {"id": "gemini-2.5-flash",                  "label": "Gemini 2.5 Flash"},
     ],
     # Mistral — prefix used in OpenRouter model IDs (mistralai/mistral-large-latest)
     "mistralai": [
@@ -756,7 +770,7 @@ def get_available_models() -> dict:
             try:
                 import json as _j
 
-                auth_store = _j.loads(auth_store_path.read_text())
+                auth_store = _j.loads(auth_store_path.read_text(encoding="utf-8"))
                 active_provider = auth_store.get("active_provider")
             except Exception:
                 logger.debug("Failed to load auth store from %s", auth_store_path)
@@ -804,7 +818,7 @@ def get_available_models() -> dict:
         env_keys = {}
         if hermes_env_path.exists():
             try:
-                for line in hermes_env_path.read_text().splitlines():
+                for line in hermes_env_path.read_text(encoding="utf-8").splitlines():
                     line = line.strip()
                     if line and not line.startswith("#") and "=" in line:
                         k, v = line.split("=", 1)
@@ -817,6 +831,7 @@ def get_available_models() -> dict:
             "OPENAI_API_KEY",
             "OPENROUTER_API_KEY",
             "GOOGLE_API_KEY",
+            "GEMINI_API_KEY",
             "GLM_API_KEY",
             "KIMI_API_KEY",
             "DEEPSEEK_API_KEY",
@@ -836,6 +851,8 @@ def get_available_models() -> dict:
             detected_providers.add("openrouter")
         if all_env.get("GOOGLE_API_KEY"):
             detected_providers.add("google")
+        if all_env.get("GEMINI_API_KEY"):
+            detected_providers.add("gemini")
         if all_env.get("GLM_API_KEY"):
             detected_providers.add("zai")
         if all_env.get("KIMI_API_KEY"):
@@ -1106,7 +1123,9 @@ def get_available_models() -> dict:
                 )
             else:
                 # Unknown provider -- use auto-detected models if available,
-                # otherwise fall back to default model placeholder
+                # otherwise skip it for the model dropdown. Do NOT inject the
+                # global default_model here: that would incorrectly imply the
+                # provider can serve the default model (e.g. Alibaba -> gpt-5.4-mini).
                 if auto_detected_models:
                     groups.append(
                         {
@@ -1114,19 +1133,6 @@ def get_available_models() -> dict:
                             "models": auto_detected_models,
                         }
                     )
-                else:
-                    if default_model:
-                        groups.append(
-                            {
-                                "provider": provider_name,
-                                "models": [
-                                    {
-                                        "id": default_model,
-                                        "label": default_model.split("/")[-1],
-                                    }
-                                ],
-                            }
-                        )
     else:
         # No providers detected. Show only the configured default model so the user
         # can at least send messages with their current setting. Avoid showing a
@@ -1169,7 +1175,14 @@ def get_available_models() -> dict:
                     injected = True
                     break
             if not injected and groups:
-                groups[0]["models"].insert(0, {"id": default_model, "label": label})
+                # Keep the default isolated rather than polluting the first
+                # detected provider group.
+                groups.append(
+                    {
+                        "provider": "Default",
+                        "models": [{"id": default_model, "label": label}],
+                    }
+                )
             elif not groups:
                 groups.append(
                     {

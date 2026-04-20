@@ -127,19 +127,19 @@
       </div>
       <!-- Profile create form (hidden by default) -->
       <div id="profileCreateForm" style="display:none;padding:8px 12px;border-bottom:1px solid var(--border);flex-shrink:0">
-        <input id="profileFormName" placeholder="Profile name (lowercase, a-z 0-9 hyphens)" style="width:100%;background:rgba(255,255,255,.05);border:1px solid var(--border2);border-radius:6px;color:var(--text);padding:5px 8px;font-size:12px;outline:none;margin-bottom:6px;box-sizing:border-box">
+        <input id="profileFormName" data-i18n-placeholder="profile_name_placeholder" placeholder="Profile name (lowercase, a-z 0-9 hyphens)" style="width:100%;background:rgba(255,255,255,.05);border:1px solid var(--border2);border-radius:6px;color:var(--text);padding:5px 8px;font-size:12px;outline:none;margin-bottom:6px;box-sizing:border-box">
         <label style="display:flex;align-items:center;gap:6px;font-size:11px;color:var(--muted);margin-bottom:8px;cursor:pointer">
-          <input type="checkbox" id="profileFormClone" style="accent-color:var(--accent)"> Clone config from active profile
+          <input type="checkbox" id="profileFormClone" style="accent-color:var(--accent)"> <span data-i18n="profile_clone_label">Clone config from active profile</span>
         </label>
-        <input id="profileFormBaseUrl" placeholder="Base URL (optional, e.g. http://localhost:11434)" style="width:100%;background:rgba(255,255,255,.05);border:1px solid var(--border2);border-radius:6px;color:var(--text);padding:5px 8px;font-size:12px;outline:none;margin-bottom:6px;box-sizing:border-box">
-        <input id="profileFormApiKey" type="password" placeholder="API key (optional)" style="width:100%;background:rgba(255,255,255,.05);border:1px solid var(--border2);border-radius:6px;color:var(--text);padding:5px 8px;font-size:12px;outline:none;margin-bottom:6px;box-sizing:border-box">
+        <input id="profileFormBaseUrl" data-i18n-placeholder="profile_base_url_placeholder" placeholder="Base URL (optional, e.g. http://localhost:11434)" style="width:100%;background:rgba(255,255,255,.05);border:1px solid var(--border2);border-radius:6px;color:var(--text);padding:5px 8px;font-size:12px;outline:none;margin-bottom:6px;box-sizing:border-box">
+        <input id="profileFormApiKey" type="password" data-i18n-placeholder="profile_api_key_placeholder" placeholder="API key (optional)" style="width:100%;background:rgba(255,255,255,.05);border:1px solid var(--border2);border-radius:6px;color:var(--text);padding:5px 8px;font-size:12px;outline:none;margin-bottom:6px;box-sizing:border-box">
         <div style="display:flex;gap:6px">
-          <button class="cron-btn run" style="flex:1" onclick="submitProfileCreate()">Create</button>
-          <button class="cron-btn" style="flex:1" onclick="toggleProfileForm()">Cancel</button>
+          <button class="cron-btn run" style="flex:1" onclick="submitProfileCreate()" data-i18n="create">Create</button>
+          <button class="cron-btn" style="flex:1" onclick="toggleProfileForm()" data-i18n="cancel">Cancel</button>
         </div>
         <div id="profileFormError" style="font-size:11px;color:var(--accent);margin-top:6px;display:none"></div>
       </div>
-      <div style="flex:1;overflow-y:auto;padding:0 12px 12px" id="profilesPanel"><div style="color:var(--muted);font-size:12px">Loading...</div></div>
+      <div style="flex:1;overflow-y:auto;padding:0 12px 12px" id="profilesPanel"><div style="color:var(--muted);font-size:12px" data-i18n="loading">Loading...</div></div>
     </div>
     <div class="sidebar-bottom">
       <button class="hermes-launch-btn" id="btnHermesPanel" onclick="toggleSettings()" title="Open Hermes control center">
@@ -180,6 +180,7 @@
       </div>
     </div>
     <div class="messages" id="messages">
+      <button id="scrollToBottomBtn" class="scroll-to-bottom-btn" aria-label="Scroll to bottom" onclick="scrollToBottom()" style="display:none">↓</button>
       <div class="empty-state" id="emptyState">
         <div class="empty-logo"><svg xmlns="http://www.w3.org/2000/svg" viewBox="0 0 64 64" width="80" height="80" aria-label="Hermes caduceus">
           <defs>
@@ -329,7 +330,8 @@
                 <option value="anthropic/claude-haiku-3-5">Claude Haiku 3.5</option>
               </optgroup>
               <optgroup label="Other">
-                <option value="google/gemini-2.5-pro">Gemini 2.5 Pro</option>
+                <option value="google/gemini-3.1-pro-preview">Gemini 3.1 Pro Preview</option>
+                <option value="google/gemini-3-flash-preview">Gemini 3 Flash Preview</option>
                 <option value="deepseek/deepseek-chat-v3-0324">DeepSeek V3</option>
                 <option value="meta-llama/llama-4-scout">Llama 4 Scout</option>
               </optgroup>
@@ -388,6 +390,7 @@
     </div>
     <div class="breadcrumb-bar" id="breadcrumbBar" style="display:none"></div>
     <div class="file-tree" id="fileTree"></div>
+    <div id="wsEmptyState" style="display:none;flex:1;align-items:center;justify-content:center;padding:24px 16px;text-align:center;color:var(--muted);font-size:12px;line-height:1.6"></div>
     <div class="preview-area" id="previewArea">
       <div class="preview-path" id="previewPath">
         <span id="previewPathText"></span>
@@ -592,7 +595,7 @@
                 <div class="settings-section-title">System</div>
                 <div class="settings-section-meta">Instance version and access controls.</div>
               </div>
-              <span class="settings-version-badge">v0.50.85</span>
+              <span class="settings-version-badge">v0.50.87</span>
             </div>
             <div class="settings-field" style="border-top:1px solid var(--border);padding-top:12px;margin-top:8px">
               <label for="settingsPassword" data-i18n="settings_label_password">Access Password</label>

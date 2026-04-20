@@ -1,5 +1,73 @@
 # Hermes Web UI -- Changelog
 
+## [v0.50.96] — 2026-04-19
+
+### Added
+- **Three-container Docker Compose reference config** — new `docker-compose.three-container.yml` adds an agent + dashboard + WebUI configuration on a shared `hermes-net` bridge, with memory/CPU limits and localhost-only port bindings by default.
+
+### Fixed
+- **Two-container compose: gateway port now exposed** — `127.0.0.1:8642:8642` added so the gateway is reachable from the host for debugging. Explicit `command: gateway run` replaces entrypoint defaults.
+- **Workspace path expansion** — `${HERMES_WORKSPACE:-~/workspace}` uses tilde in the default value, which Docker Compose correctly expands. `docker-compose.yml` also fixed to use `${HERMES_WORKSPACE:-${HOME}/workspace}` instead of nesting workspace inside the hermes home dir.
+- **`HERMES_WEBUI_STATE_DIR` default corrected** — `webui-mvp` → `webui`, matching the current default in `config.py`. Prevents silent state directory split for new deployments.
+(PR #708)
+
+## [v0.50.95] — 2026-04-19
+
+### Added
+- **Full Russian (ru-RU) localization** — 389/389 English keys covered, Slavic plural forms correctly implemented, native Cyrillic characters throughout. Login page Russian added. Russian locale now leads all non-English locales on key coverage. (PR #713, credit: @DrMaks22 and @renheqiang)
+
+## [v0.50.92] — 2026-04-19
+
+### Fixed
+- **XML tool-call syntax no longer leaks into chat bubbles** — `<function_calls>` blocks stripped server-side in the streaming pipeline and client-side in both the live stream and history render. Fixes the default DeepSeek profile showing raw XML on starter prompts. (#702)
+- **Workspace file panel shows an empty-state message** instead of a blank pane when no workspace is configured or the directory is empty. (#703)
+- **Notification settings description uses "app" instead of "tab"** — more accurate for native Mac app users. (#704)
+(PR #712)
+
+## [v0.50.94] — 2026-04-19
+
+### Fixed
+- **Mic toggle is now race-safe and works over Tailscale** — rapid click/toggle no longer leaves recording in inconsistent state (`_isRecording` flag with proper reset in all paths). `recognition.start()` is now correctly called (was previously only present in a comment string, so SpeechRecognition never started and the Tailscale fallback never fired). Falls back to `MediaRecorder` when `speech.googleapis.com` is unreachable. Browser capability preference persisted in `localStorage` across reloads. (PR #683 by @MatzAgent)
+
+## [v0.50.93] — 2026-04-19
+
+### Fixed
+- **Gateway message sync no longer corrupts the active session on slow networks** — the `sessions_changed` SSE handler now captures the active session ID before the async `import_cli` fetch and validates it in `.then()`, preventing session-switch races from overwriting the wrong conversation. Added `is_cli_session` guard so the handler only fires for CLI-originated sessions. The backend import path now also verifies that existing messages are a strict prefix of the fresh CLI messages before overwriting, preventing silent data loss on hybrid WebUI+CLI sessions. (PR #676 by @yunyunyunyun-yun)
+
+## [v0.50.91] — 2026-04-19
+
+### Added
+- **Slash command parity with hermes-agent** — `/retry`, `/undo`, `/stop`, `/title`, `/status`, `/voice` commands now work in the Web UI, matching gateway behaviour. New `GET /api/commands` endpoint and `api/session_ops.py` backend. (PR #618 by @renheqiang)
+- **Skills appear in `/` autocomplete** — the composer slash-command dropdown now surfaces Hermes skills from `/api/skills`. Skill entries show a `Skill` badge and are ranked below built-ins on collisions. (PR #701 by @franksong2702)
+
+## [v0.50.87] — 2026-04-18
+
+### Fixed
+- **Streaming scroll override (#677)** — auto-scroll no longer hijacks your position while the AI is responding. `renderMessages()` and `appendThinking()` now call `scrollIfPinned()` during an active stream instead of `scrollToBottom()`, so scrolling up to read earlier content works correctly. Scroll re-pin threshold widened from 80px to 150px to avoid hair-trigger re-pinning on fast mouse wheels. A floating **↓ button** appears at the bottom-right of the message area when you scroll up, giving a one-click way to jump back to live output.
+- **Gemini 3.x model IDs updated (#669)** — all provider model lists (`gemini`, `google`, OpenRouter fallback, GitHub Copilot, OpenCode Zen, Nous) now include the correct Gemini 3.1 Pro Preview, Gemini 3 Flash Preview, and Gemini 3.1 Flash Lite Preview model IDs alongside stable Gemini 2.5 models. The missing `gemini-3.1-flash-lite-preview` (which caused `API_KEY_INVALID` errors) is now present. `GEMINI_API_KEY` env var now also triggers native gemini provider detection.
+- **Read-only workspace mount no longer crashes Docker startup (#670)** — `docker_init.bash` now checks `[ -w "$HERMES_WEBUI_DEFAULT_WORKSPACE" ]` before attempting `chown` or write-test on the workspace directory. `:ro` bind-mounts are silently accepted with a log message instead of calling `error_exit`.
+- **UID/GID auto-detection now works in two-container setups (#668)** — `docker_init.bash` now probes `/home/hermeswebui/.hermes` and `$HERMES_HOME` (shared hermes-home volume) before falling back to `/workspace`. In Zeabur and Docker Compose two-container deployments where the hermes-agent container initializes the shared volume first, the WebUI now correctly inherits its UID/GID without manual `WANTED_UID` configuration.
+
+## [v0.50.86] — 2026-04-18
+
+### Added
+- **Searchable model picker** — the model dropdown now has a live search input at the top. Type any part of a model name or ID to filter the list instantly; provider group headers (Anthropic, OpenAI, OpenRouter, etc.) remain visible in filtered results. Includes a clear button, Escape-to-close support, and a "No models found" empty state. i18n strings added for English, Spanish, and zh-CN. (PR #659 by @mmartial)
+
+## [v0.50.90] — 2026-04-19
+
+### Fixed
+- **`/compress` reference card now shows full handoff immediately after compression** — the context compaction card no longer shows only the short 3-line API summary right after `/compress` completes. The UI now prefers the persisted compaction message (full handoff) over the raw API response, matching what is shown after a page reload. (PR #699 by @franksong2702)
+
+## [v0.50.89] — 2026-04-19
+
+### Fixed
+- **Explicit UTF-8 encoding on all config/profile reads** — `Path.read_text()` calls in `api/config.py` and `api/profiles.py` now always specify `encoding="utf-8"`. On Windows systems with a non-UTF-8 default locale (e.g. GBK on Chinese Windows, Shift_JIS on Japanese Windows), omitting the encoding argument caused silent config loading failures. (PR #700 by @woaijiadanoo)
+
+## [v0.50.88] — 2026-04-19
+
+### Fixed
+- **System Preferences model dropdown no longer misattributes the default model to unrelated providers** — the `/api/models` builder no longer injects the global `default_model` into unknown provider groups such as `Alibaba` or `Minimax-Cn`. When a provider has no real model catalog of its own, it is now omitted from the dropdown instead of showing a misleading placeholder like `gpt-5.4-mini`. If the active provider still needs a default fallback, it is shown in a separate `Default` group rather than being mixed into another provider's models.
+
 ## [v0.50.85] — 2026-04-18
 
 ### Fixed
@@ -1628,4 +1696,3 @@ Critical regressions introduced during the server.py split, caught by users and 
 - **Regression test file added** (`tests/test_regressions.py`): 10 tests, one per introduced bug. These form a permanent regression gate so each class of error can never silently return.
 
 ---
-

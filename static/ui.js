@@ -222,45 +222,99 @@ function renderModelDropdown(){
   const dd=$('composerModelDropdown');
   const sel=$('modelSelect');
   if(!dd||!sel) return;
-  dd.innerHTML='';
+  // Store model data for filtering
+  const _modelData=[];
   for(const child of Array.from(sel.children)){
     if(child.tagName==='OPTGROUP'){
-      const heading=document.createElement('div');
-      heading.className='model-group';
-      heading.textContent=child.label||'Models';
-      dd.appendChild(heading);
       for(const opt of Array.from(child.children)){
-        const row=document.createElement('div');
-        row.className='model-opt'+(opt.value===sel.value?' active':'');
-        row.innerHTML=`<span class="model-opt-name">${esc(opt.textContent||getModelLabel(opt.value))}</span><span class="model-opt-id">${esc(opt.value)}</span>`;
-        row.onclick=()=>selectModelFromDropdown(opt.value);
-        dd.appendChild(row);
+        _modelData.push({value:opt.value,name:esc(opt.textContent||getModelLabel(opt.value)),id:esc(opt.value),group:child.label||''});
       }
-      continue;
     }
     if(child.tagName==='OPTION'){
-      const row=document.createElement('div');
-      row.className='model-opt'+(child.value===sel.value?' active':'');
-      row.innerHTML=`<span class="model-opt-name">${esc(child.textContent||getModelLabel(child.value))}</span><span class="model-opt-id">${esc(child.value)}</span>`;
-      row.onclick=()=>selectModelFromDropdown(child.value);
-      dd.appendChild(row);
+      _modelData.push({value:child.value,name:esc(child.textContent||getModelLabel(child.value)),id:esc(child.value),group:''});
     }
   }
-  // Custom model ID input — lets users type any model not in the curated list
+  // Create search input FIRST before filterModels definition
+  const _searchRow=document.createElement('div');
+  _searchRow.className='model-search-row';
+  _searchRow.innerHTML=`<input class="model-search-input" type="text" placeholder="${esc(t('model_search_placeholder')||'Search models…')}" spellcheck="false" autocomplete="off"><button class="model-search-clear" title="Clear search">${li('x',10)}</button>`;
+  const _si=_searchRow.querySelector('.model-search-input');
+  const _sc=_searchRow.querySelector('.model-search-clear');
+  // Create custom model section elements
   const _custSep=document.createElement('div');
   _custSep.className='model-group model-custom-sep';
   _custSep.textContent=t('model_custom_label')||'Custom model ID';
-  dd.appendChild(_custSep);
   const _custRow=document.createElement('div');
   _custRow.className='model-custom-row';
   _custRow.innerHTML=`<input class="model-custom-input" type="text" placeholder="${esc(t('model_custom_placeholder')||'e.g. openai/gpt-5.4')}" spellcheck="false" autocomplete="off"><button class="model-custom-btn" title="Use this model">${li('plus',12)}</button>`;
   const _ci=_custRow.querySelector('.model-custom-input');
   const _cb=_custRow.querySelector('.model-custom-btn');
+  // Filter function (defined AFTER _searchRow and _cust* are created)
+  const _filterModels=(term)=>{
+    term=term.trim().toLowerCase();
+    const found=new Set();
+    for(const m of _modelData){
+      const name=m.name.toLowerCase();
+      const id=m.id.toLowerCase();
+      if(name.includes(term)||id.includes(term)){
+        found.add(m.value);
+      }
+    }
+    // Clear and rebuild
+    dd.innerHTML='';
+    // Add search and custom elements first (CRITICAL: must be before models)
+    dd.appendChild(_searchRow);
+    dd.appendChild(_custSep);
+    dd.appendChild(_custRow);
+    // Add models matching filter
+    let _lastGroup=null;
+    for(const m of _modelData){
+      if(!term||found.has(m.value)){
+        if(m.group&&m.group!==_lastGroup){
+          const heading=document.createElement('div');
+          heading.className='model-group';
+          heading.textContent=m.group;
+          dd.appendChild(heading);
+          _lastGroup=m.group;
+        }
+        const row=document.createElement('div');
+        row.className='model-opt'+(m.value===sel.value?' active':'');
+        row.innerHTML=`<span class="model-opt-name">${m.name}</span><span class="model-opt-id">${m.id}</span>`;
+        row.onclick=()=>selectModelFromDropdown(m.value);
+        dd.appendChild(row);
+      }
+    }
+    // Show "No results" if filtered and nothing matched
+    if(term&&found.size===0){
+      const noResult=document.createElement('div');
+      noResult.className='model-search-no-results';
+      noResult.textContent=t('model_search_no_results')||'No models found';
+      noResult.style.padding='12px 14px';
+      noResult.style.color='var(--muted)';
+      noResult.style.textAlign='center';
+      dd.appendChild(noResult);
+    }
+    // Restore focus to search input
+    _si.focus();
+  };
+  // Event handlers for search input
+  _si.addEventListener('input',()=>_filterModels(_si.value));
+  _si.addEventListener('keydown',e=>{if(e.key==='Enter') {e.preventDefault();}if(e.key==='Escape') {closeModelDropdown();}});
+  _si.addEventListener('click',e=>e.stopPropagation());
+  // Event handlers for clear button
+  _sc.onclick=()=>{ _si.value=''; _filterModels(''); _si.focus(); };
+  _sc.addEventListener('keydown',e=>{if(e.key==='Enter'||e.key===' '){ _si.value=''; _filterModels(''); _si.focus(); e.preventDefault(); }});
+  // Event handlers for custom input
   const _applyCustom=()=>{const v=_ci.value.trim();if(!v)return;selectModelFromDropdown(v);_ci.value='';};
   _cb.onclick=_applyCustom;
   _ci.addEventListener('keydown',e=>{if(e.key==='Enter'){e.preventDefault();_applyCustom();}if(e.key==='Escape'){closeModelDropdown();}});
   _ci.addEventListener('click',e=>e.stopPropagation());
+  // Add search and custom elements to dropdown (initial render)
+  dd.appendChild(_searchRow);
+  dd.appendChild(_custSep);
   dd.appendChild(_custRow);
+  // Apply initial filter (empty shows all)
+  _filterModels('');
 }
 
 async function selectModelFromDropdown(value){
@@ -315,14 +369,16 @@ window.addEventListener('resize',()=>{
 
 // ── Scroll pinning ──────────────────────────────────────────────────────────
 // When streaming, auto-scroll only if the user hasn't manually scrolled up.
-// Once the user scrolls back to within 80px of the bottom, re-pin.
+// Once the user scrolls back to within 150px of the bottom, re-pin.
 let _scrollPinned=true;
 (function(){
   const el=document.getElementById('messages');
   if(!el) return;
   el.addEventListener('scroll',()=>{
-    const nearBottom=el.scrollHeight-el.scrollTop-el.clientHeight<80;
+    const nearBottom=el.scrollHeight-el.scrollTop-el.clientHeight<150;
     _scrollPinned=nearBottom;
+    const btn=$('scrollToBottomBtn');
+    if(btn) btn.style.display=_scrollPinned?'none':'flex';
   });
 })();
 function _fmtTokens(n){if(!n||n<0)return'0';if(n>=1e6)return(n/1e6).toFixed(1)+'M';if(n>=1e3)return(n/1e3).toFixed(1)+'k';return String(n);}
@@ -393,6 +449,8 @@ function scrollToBottom(){
   _scrollPinned=true;
   const el=$('messages');
   if(el) el.scrollTop=el.scrollHeight;
+  const btn=$('scrollToBottomBtn');
+  if(btn) btn.style.display='none';
 }
 
 function getModelLabel(modelId){
@@ -400,9 +458,20 @@ function getModelLabel(modelId){
   // Check dynamic labels first, then fall back to splitting the ID
   if(_dynamicModelLabels[modelId]) return _dynamicModelLabels[modelId];
   // Static fallback for common models
-  const STATIC_LABELS={'openai/gpt-5.4-mini':'GPT-5.4 Mini','openai/gpt-4o':'GPT-4o','openai/o3':'o3','openai/o4-mini':'o4-mini','anthropic/claude-sonnet-4.6':'Sonnet 4.6','anthropic/claude-sonnet-4-5':'Sonnet 4.5','anthropic/claude-haiku-3-5':'Haiku 3.5','google/gemini-2.5-pro':'Gemini 2.5 Pro','deepseek/deepseek-chat-v3-0324':'DeepSeek V3','meta-llama/llama-4-scout':'Llama 4 Scout'};
+  const STATIC_LABELS={'openai/gpt-5.4-mini':'GPT-5.4 Mini','openai/gpt-4o':'GPT-4o','openai/o3':'o3','openai/o4-mini':'o4-mini','anthropic/claude-sonnet-4.6':'Sonnet 4.6','anthropic/claude-sonnet-4-5':'Sonnet 4.5','anthropic/claude-haiku-3-5':'Haiku 3.5','google/gemini-3.1-pro-preview':'Gemini 3.1 Pro','google/gemini-3-flash-preview':'Gemini 3 Flash','google/gemini-3.1-flash-lite-preview':'Gemini 3.1 Flash Lite','google/gemini-2.5-pro':'Gemini 2.5 Pro','google/gemini-2.5-flash':'Gemini 2.5 Flash','deepseek/deepseek-chat-v3-0324':'DeepSeek V3','meta-llama/llama-4-scout':'Llama 4 Scout'};
   if(STATIC_LABELS[modelId]) return STATIC_LABELS[modelId];
   return modelId.split('/').pop()||'Unknown';
+}
+
+function _stripXmlToolCallsDisplay(s){
+  // Strip <function_calls>...</function_calls> blocks emitted by DeepSeek and
+  // similar models in their raw response text.  These are processed separately
+  // as tool calls; leaving them in the content causes them to render visibly
+  // in the settled chat bubble.  (#702)
+  if(!s||s.toLowerCase().indexOf('<function_calls>')===-1) return s;
+  s=s.replace(/<function_calls>[\s\S]*?<\/function_calls>/gi,'');
+  s=s.replace(/<function_calls>[\s\S]*$/i,'');
+  return s.trim();
 }
 
 function renderMd(raw){
@@ -1401,7 +1470,7 @@ function renderMessages(){
     if(m.attachments&&m.attachments.length){
       filesHtml=`<div class="msg-files">${m.attachments.map(f=>`<div class="msg-file-badge">${li('paperclip',12)} ${esc(f)}</div>`).join('')}</div>`;
     }
-    const bodyHtml = isUser ? esc(String(content)).replace(/\n/g,'<br>') : renderMd(String(content));
+    const bodyHtml = isUser ? esc(String(content)).replace(/\n/g,'<br>') : renderMd(_stripXmlToolCallsDisplay(String(content)));
     const editBtn  = isUser  ? `<button class="msg-action-btn" title="${t('edit_message')}" onclick="editMessage(this)">${li('pencil',13)}</button>` : '';
     const retryBtn = isLastAssistant ? `<button class="msg-action-btn" title="${t('regenerate')}" onclick="regenerateResponse(this)">${li('rotate-ccw',13)}</button>` : '';
     const copyBtn  = `<button class="msg-copy-btn msg-action-btn" title="${t('copy')}" onclick="copyMsg(this)">${li('copy',13)}</button>`;
@@ -1625,7 +1694,14 @@ function renderMessages(){
       _assistantTurnBlocks(lastAssist).appendChild(usage);
     }
   }
-  scrollToBottom();
+  // Only force-scroll when not actively streaming — mid-stream re-renders
+  // (tool completion, session switch) must not override the user's scroll position.
+  // scrollIfPinned() respects _scrollPinned, so it's a no-op if user scrolled up.
+  if(S.activeStreamId){
+    scrollIfPinned();
+  } else {
+    scrollToBottom();
+  }
   // Apply syntax highlighting after DOM is built
   requestAnimationFrame(()=>{highlightCode();addCopyButtons();renderMermaidBlocks();renderKatexBlocks();});
   // Refresh todo panel if it's currently open
@@ -1997,7 +2073,7 @@ function appendThinking(text=''){
   }
   row.className=(text&&String(text).trim())?'assistant-segment thinking-card-row':'assistant-segment';
   row.innerHTML=_thinkingMarkup(text);
-  scrollToBottom();
+  scrollIfPinned();
 }
 function updateThinking(text=''){appendThinking(text);}
 function removeThinking(){
@@ -2070,6 +2146,20 @@ function renderFileTree(){
   const box=$('fileTree');box.innerHTML='';
   // Cache current dir entries
   S._dirCache[S.currentDir||'.']=S.entries;
+  // Show empty-state when no workspace is set or the directory is empty (#703)
+  const emptyEl=$('wsEmptyState');
+  const hasWorkspace=!!(S.session&&S.session.workspace);
+  if(!hasWorkspace){
+    if(emptyEl){emptyEl.textContent=t('workspace_empty_no_path');emptyEl.style.display='flex';}
+    box.style.display='none';
+    return;
+  }
+  if(emptyEl) emptyEl.style.display='none';
+  box.style.display='';
+  if(!S.entries||!S.entries.length){
+    if(emptyEl){emptyEl.textContent=t('workspace_empty_dir');emptyEl.style.display='flex';}
+    return;
+  }
   _renderTreeItems(box, S.entries, 0);
 }
 
