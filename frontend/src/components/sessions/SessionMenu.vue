@@ -82,12 +82,12 @@ function handleDeleteIntent() {
 
 async function handleDeleteConfirm() {
   showDeleteDialog.value = false
-  emit('close')
   try {
     await sessionStore.deleteSession(props.session.session_id)
-  } catch {
-    // ignore
+  } catch (err) {
+    console.error('[SessionMenu] delete failed:', err)
   }
+  emit('close')
 }
 
 function handleDeleteCancel() {

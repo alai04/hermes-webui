@@ -9,8 +9,8 @@ export default defineConfig({
   },
   server: {
     proxy: {
-      '/api': { target: 'http://localhost:5001', changeOrigin: true },
-      '/health': { target: 'http://localhost:5001', changeOrigin: true },
+      '/api': { target: 'http://192.168.2.3:8787', changeOrigin: true },
+      '/health': { target: 'http://192.168.2.3:8787', changeOrigin: true },
     }
   }
 })

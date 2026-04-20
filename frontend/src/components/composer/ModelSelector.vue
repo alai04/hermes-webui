@@ -62,7 +62,8 @@ async function loadModels() {
     const res = await fetch('/api/models', { credentials: 'include' })
     if (res.ok) {
       const data = await res.json()
-      models.value = (data.models ?? data) as ModelEntry[]
+      const raw = data.models ?? data
+      models.value = normalizeModels(raw)
     }
   } catch { /* ignore */ }
 
@@ -71,10 +72,19 @@ async function loadModels() {
     const res2 = await fetch('/api/models/live', { credentials: 'include' })
     if (res2.ok) {
       const data2 = await res2.json()
-      const live = (data2.models ?? data2) as ModelEntry[]
-      if (live.length > 0) models.value = live
+      const live = data2.models ?? data2
+      if (normalizeModels(live).length > 0) models.value = normalizeModels(live)
     }
   } catch { /* ignore */ }
+}
+
+function normalizeModels(raw: unknown): ModelEntry[] {
+  if (!Array.isArray(raw)) return []
+  return raw.map((m: any) => {
+    if (typeof m === 'string') return { id: m }
+    if (typeof m === 'object' && m != null) return { id: m.id ?? m.model ?? '', name: m.name ?? m.display_name, provider: m.provider }
+    return { id: '' }
+  }).filter((m) => !!m.id)
 }
 
 function toggleDropdown() {

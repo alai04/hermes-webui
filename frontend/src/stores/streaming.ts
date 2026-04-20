@@ -23,6 +23,7 @@ export const useStreamingStore = defineStore('streaming', () => {
   const liveThinking = ref<string>('')
   const toolCallsLive = ref<LiveToolCall[]>([])
   const isStreaming = ref<boolean>(false)
+  const currentStreamId = ref<string | null>(null)
 
   // Polling intervals for approval/clarify
   let _approvalPollInterval: ReturnType<typeof setInterval> | null = null
@@ -61,6 +62,7 @@ export const useStreamingStore = defineStore('streaming', () => {
     isStreaming.value = true
     sessionStore.busy = true
     sessionStore.activeStreamId = streamId
+    currentStreamId.value = streamId
 
     const source = new EventSource(
       `/api/chat/stream?stream_id=${encodeURIComponent(streamId)}`,
@@ -69,7 +71,13 @@ export const useStreamingStore = defineStore('streaming', () => {
     activeStreams.value.set(sessionId, { source, streamId })
 
     source.addEventListener('token', (e: MessageEvent) => {
-      liveTokens.value += e.data
+      try {
+        const payload = JSON.parse(e.data)
+        liveTokens.value += payload.text ?? ''
+      } catch {
+        // Some backends send plain text tokens — fall back to raw data
+        liveTokens.value += e.data
+      }
     })
 
     source.addEventListener('tool_start', (e: MessageEvent) => {
@@ -134,20 +142,19 @@ export const useStreamingStore = defineStore('streaming', () => {
     return streamId
   }
 
-  async function cancelStream(streamId: string): Promise<void> {
+  async function cancelStream(): Promise<void> {
+    const sid = currentStreamId.value
+    if (!sid) return
     try {
-      await fetch(`/api/chat/cancel?stream_id=${encodeURIComponent(streamId)}`, {
+      await fetch(`/api/chat/cancel?stream_id=${encodeURIComponent(sid)}`, {
         credentials: 'include',
       })
     } catch {
       // Best-effort cancel
     }
-    // Find which session this stream belongs to and clean it up
-    for (const [sessionId, stream] of activeStreams.value.entries()) {
-      if (stream.streamId === streamId) {
-        _cleanupStream(sessionId)
-        break
-      }
+    // Clean up all active streams on cancel
+    for (const sessionId of activeStreams.value.keys()) {
+      _cleanupStream(sessionId)
     }
   }
 
@@ -195,6 +202,7 @@ export const useStreamingStore = defineStore('streaming', () => {
     isStreaming.value = activeStreams.value.size > 0
     sessionStore.busy = isStreaming.value
     sessionStore.activeStreamId = null
+    currentStreamId.value = null
     liveTokens.value = ''
     liveThinking.value = ''
     toolCallsLive.value = []
@@ -255,6 +263,7 @@ export const useStreamingStore = defineStore('streaming', () => {
     liveThinking,
     toolCallsLive,
     isStreaming,
+    currentStreamId,
     pendingApproval,
     pendingClarify,
     pendingSessionId,

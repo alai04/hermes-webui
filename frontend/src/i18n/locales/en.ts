@@ -276,6 +276,13 @@ const en = {
   model_search_no_results: 'No models found',
   model_custom_label: 'Custom model ID',
   model_custom_placeholder: 'e.g. openai/gpt-5.4',
+
+  // composer
+  msg_placeholder: 'Message {name}\u2026',
+  attach_file: 'Attach file',
+  send: 'Send',
+  uploading: 'Uploading\u2026',
+  error_prefix: 'Error',
 }
 
 export default en

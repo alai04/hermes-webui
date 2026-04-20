@@ -122,8 +122,15 @@ onMounted(() => {
         @regenerate="handleRegenerate"
       />
 
-      <!-- Live streaming message -->
+      <!-- Live streaming content -->
       <template v-if="streamingStore.isStreaming || streamingStore.liveTokens">
+        <!-- Thinking indicator while waiting for first token -->
+        <ThinkingBlock
+          v-if="!streamingStore.liveTokens && !streamingStore.liveThinking"
+          :content="''"
+          :streaming="true"
+        />
+
         <!-- Live thinking block -->
         <ThinkingBlock
           v-if="streamingStore.liveThinking"

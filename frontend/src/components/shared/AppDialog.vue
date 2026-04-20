@@ -54,6 +54,7 @@ onBeforeUnmount(() => {
         role="dialog"
         :aria-label="title || t('dialog_confirm_title')"
         aria-modal="true"
+        @mousedown.stop
         @click.self="emit('cancel')"
       >
         <div class="dialog-panel">
