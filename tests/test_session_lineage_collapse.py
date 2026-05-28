@@ -126,6 +126,47 @@ console.log(JSON.stringify({{sid: collapsed[0].session_id, containsRoot: _sessio
     assert '"containsRoot":true' in result
 
 
+def test_parent_present_webui_compression_child_without_lineage_metadata_collapses():
+    """WebUI-native compression continuations may only carry parent_session_id.
+
+    When both the preserved parent snapshot and the new continuation are present
+    in the sidebar payload, the continuation should still collapse with its
+    parent instead of appearing as a separate branch-like conversation (#2489).
+    """
+    js = SESSIONS_JS_PATH.read_text(encoding="utf-8")
+    source = f"""
+const src = {js!r};
+function extractFunc(name) {{
+  const re = new RegExp('function\\\\s+' + name + '\\\\s*\\\\(');
+  const start = src.search(re);
+  if (start < 0) throw new Error(name + ' not found');
+  let i = src.indexOf('{{', start);
+  let depth = 1; i++;
+  while (depth > 0 && i < src.length) {{
+    if (src[i] === '{{') depth++;
+    else if (src[i] === '}}') depth--;
+    i++;
+  }}
+  return src.slice(start, i);
+}}
+eval(extractFunc('_sessionTimestampMs'));
+eval(extractFunc('_isChildSession'));
+eval(extractFunc('_sessionLineageKey'));
+eval(extractFunc('_collapseSessionLineageForSidebar'));
+const sessions = [
+  {{session_id:'parent', title:'Long WebUI conversation', message_count:50, updated_at:10, last_message_at:10, pre_compression_snapshot:true}},
+  {{session_id:'child', title:'Long WebUI conversation', parent_session_id:'parent', message_count:12, updated_at:20, last_message_at:20}},
+];
+const collapsed = _collapseSessionLineageForSidebar(sessions);
+console.log(JSON.stringify(collapsed));
+"""
+    collapsed = json.loads(_run_node(source))
+    assert [row["session_id"] for row in collapsed] == ["child"]
+    assert collapsed[0]["_lineage_key"] == "parent"
+    assert collapsed[0]["_lineage_collapsed_count"] == 2
+    assert [seg["session_id"] for seg in collapsed[0]["_lineage_segments"]] == ["child", "parent"]
+
+
 def test_stale_optimistic_compression_tips_collapse_even_when_parents_are_visible():
     """Active compression can leave old streaming tips in browser memory.
 
@@ -210,6 +251,89 @@ console.log(JSON.stringify(collapsed));
     assert collapsed[0]["_lineage_collapsed_count"] == 2
     assert [seg["session_id"] for seg in collapsed[0]["_lineage_segments"]] == ["seg14", "seg13"]
 
+
+
+def test_sidebar_lineage_collapse_prefers_current_tip_over_same_segment_snapshot():
+    """A preserved parent snapshot can share the child's backend segment count.
+
+    Loading/polling the parent refreshes its timestamp, but the collapsed row
+    must still open the non-snapshot continuation tip. Otherwise a reload after
+    compression jumps back to the older parent transcript and looks like the
+    active conversation disappeared.
+    """
+    js = SESSIONS_JS_PATH.read_text(encoding="utf-8")
+    source = f"""
+const src = {js!r};
+function extractFunc(name) {{
+  const re = new RegExp('function\\\\s+' + name + '\\\\s*\\\\(');
+  const start = src.search(re);
+  if (start < 0) throw new Error(name + ' not found');
+  let i = src.indexOf('{{', start);
+  let depth = 1; i++;
+  while (depth > 0 && i < src.length) {{
+    if (src[i] === '{{') depth++;
+    else if (src[i] === '}}') depth--;
+    i++;
+  }}
+  return src.slice(start, i);
+}}
+eval(extractFunc('_sessionTimestampMs'));
+eval(extractFunc('_isChildSession'));
+eval(extractFunc('_sessionLineageKey'));
+eval(extractFunc('_collapseSessionLineageForSidebar'));
+const sessions = [
+  {{session_id:'parent', title:'Duplicate Assistant Text Blocks', message_count:64, updated_at:300, last_message_at:300, pre_compression_snapshot:true, _lineage_root_id:'parent', _compression_segment_count:2}},
+  {{session_id:'child', title:'Duplicate Assistant Text Blocks', parent_session_id:'parent', message_count:86, updated_at:200, last_message_at:200, _lineage_root_id:'parent', _compression_segment_count:2}},
+];
+const collapsed = _collapseSessionLineageForSidebar(sessions);
+console.log(JSON.stringify(collapsed));
+"""
+    collapsed = json.loads(_run_node(source))
+    assert [row["session_id"] for row in collapsed] == ["child"]
+    assert collapsed[0]["_lineage_collapsed_count"] == 2
+    assert [seg["session_id"] for seg in collapsed[0]["_lineage_segments"]] == ["child", "parent"]
+
+
+
+def test_direct_parent_restore_resolves_to_visible_compression_tip():
+    """A stale /session/<parent> URL should reopen the visible continuation tip.
+
+    The sidebar payload may omit the archived pre-compression parent but still
+    include the latest continuation with lineage metadata pointing back to the
+    parent. Boot restore should use that visible tip instead of loading the old
+    parent transcript and making the continuation look lost.
+    """
+    js = SESSIONS_JS_PATH.read_text(encoding="utf-8")
+    source = f"""
+const src = {js!r};
+function extractFunc(name) {{
+  const re = new RegExp('function\\\\s+' + name + '\\\\s*\\\\(');
+  const start = src.search(re);
+  if (start < 0) throw new Error(name + ' not found');
+  let i = src.indexOf('{{', start);
+  let depth = 1; i++;
+  while (depth > 0 && i < src.length) {{
+    if (src[i] === '{{') depth++;
+    else if (src[i] === '}}') depth--;
+    i++;
+  }}
+  return src.slice(start, i);
+}}
+var _allSessions = [
+  {{session_id:'child', title:'Duplicate Assistant Text Blocks', parent_session_id:'parent', message_count:86, updated_at:200, last_message_at:200, _lineage_root_id:'parent', _compression_segment_count:2}},
+  {{session_id:'other', title:'Other', message_count:4, updated_at:100, last_message_at:100}},
+];
+eval(extractFunc('_sessionTimestampMs'));
+eval(extractFunc('_isChildSession'));
+eval(extractFunc('_sessionLineageKey'));
+eval(extractFunc('_sessionLineageContainsSession'));
+eval(extractFunc('_sidebarLineageKeyForRow'));
+eval(extractFunc('_collapseSessionLineageForSidebar'));
+eval(extractFunc('_resolveSessionIdFromSidebarLineage'));
+console.log(JSON.stringify({{parent:_resolveSessionIdFromSidebarLineage('parent'), child:_resolveSessionIdFromSidebarLineage('child'), other:_resolveSessionIdFromSidebarLineage('other')}}));
+"""
+    result = json.loads(_run_node(source))
+    assert result == {"parent": "child", "child": "child", "other": "other"}
 
 
 def test_sidebar_attaches_child_sessions_to_collapsed_hidden_parent_lineage():
@@ -324,11 +448,16 @@ console.log(JSON.stringify(cases));
     assert json.loads(_run_node(source)) == [3, 25, 3, 0, 0]
 
 
-def test_sidebar_lineage_segment_badge_is_localized():
+def test_sidebar_lineage_segment_badge_is_detailed_density_only_and_localized():
     js = SESSIONS_JS_PATH.read_text(encoding="utf-8")
     css = (REPO_ROOT / "static" / "style.css").read_text(encoding="utf-8")
     assert "session-lineage-count" in js
-    assert "const segmentCount=_sessionSegmentCount(s);" in js
+    assert "const density=(window._sidebarDensity==='detailed'?'detailed':'compact');" in js
+    assert "const showLineageMetadata=density==='detailed';" in js
+    assert "const segmentCount=showLineageMetadata?_sessionSegmentCount(s):0;" in js
+    assert "const lineageSegments=showLineageMetadata?_lineageSegmentsForRender(s,lineageKey):[];" in js
+    assert "const needsLineageReport=showLineageMetadata?_lineageReportNeedsFetch(s,lineageKey,segmentCount):false;" in js
+    assert "const canExpandLineageSegments=showLineageMetadata&&Boolean(" in js
     assert "t('session_meta_segments', segmentCount)" in js
     assert "titleRow.appendChild(segmentCountEl);" in js
     assert ".session-lineage-count{" in css
@@ -350,7 +479,7 @@ def test_lineage_segment_expansion_static_contract():
     assert "encodeURIComponent(s.session_id)" in js
     assert "className='session-lineage-segments'" in js
     assert "className='session-lineage-segment'" in js
-    assert "const segTitle=seg.title||t('session_lineage_segment_untitled');" in js
+    assert "const segTitle=_sessionDisplayTitle(seg)||t('session_lineage_segment_untitled');" in js
     assert "row.title=t('session_lineage_segment_open');" in js
     assert "await loadSession(seg.session_id);" in js
     assert ".session-lineage-count.expandable{" in css
@@ -532,3 +661,116 @@ def test_lineage_segment_locale_keys_are_defined_for_sidebar_locales():
     locale_count = i18n.count("session_meta_messages:")
     for key in required:
         assert i18n.count(key) >= locale_count, f"{key} missing from one or more locale blocks"
+
+def test_session_meta_segments_softened_label_no_literal_segment_in_english():
+    """Regression: the sidebar badge for compressed/lineage rows must not visibly
+    say 'X segments' by default — the technical internal term should be replaced
+    with softer user-facing copy (#2155).
+
+    This verifies the English base locale's session_meta_segments key so that
+    t() fallback for untranslated locales also produces softened copy.
+    """
+    import re
+    i18n_text = (REPO_ROOT / 'static' / 'i18n.js').read_text(encoding='utf-8')
+    # Locate the English base-locale block (first occurrence, before any _lang guard).
+    first_lang = i18n_text.index('_lang: \'en\'')
+    second_lang = i18n_text.index('_lang:', first_lang + 1)
+    english_slice = i18n_text[first_lang:second_lang]
+    assert 'session_meta_segments:' in english_slice, 'session_meta_segments missing from English locale'
+    # Capture only the arrow-function value (not the key name which also contains 'segment').
+    match = re.search(
+        r"session_meta_segments:\s*(\(\w+\)\s*=>\s*[^,]+)",
+        english_slice,
+    )
+    assert match, 'session_meta_segments value not found in English locale'
+    rendered = match.group(1)
+    assert 'segment' not in rendered, (
+        f"session_meta_segments English value still contains the technical word 'segment': {rendered}. "
+        "Expected softened copy like 'prior turn(s)' instead. See #2155."
+    )
+
+
+def test_sidebar_search_and_rows_use_read_only_display_title():
+    """Stale persisted titles should not drive sidebar search/render when display_title exists."""
+    js = SESSIONS_JS_PATH.read_text(encoding="utf-8")
+    assert "function _sessionDisplayTitle" in js
+    assert "function _sessionTitleTags" in js
+    assert "_allSessions.filter(s=>_sessionDisplayTitle(s).toLowerCase().includes(q))" in js
+    assert "_allSessions.filter(s => _sessionDisplayTitle(s).toLowerCase().includes(q.toLowerCase()))" in js
+    assert "const rawTitle=_sessionDisplayTitle(s);" in js
+    assert "const tags=_sessionTitleTags(rawTitle);" in js
+    assert "const segTitle=_sessionDisplayTitle(seg)||t('session_lineage_segment_untitled');" in js
+    assert "const childTitle=_sessionDisplayTitle(child)||'Untitled child session';" in js
+
+
+def test_child_session_parent_segment_note_uses_display_title():
+    """A child attached through a hidden parent segment should show the reconciled segment title."""
+    js = SESSIONS_JS_PATH.read_text(encoding="utf-8")
+    source = f"""
+const src = {js!r};
+function extractFunc(name) {{
+  const re = new RegExp('function\\\\s+' + name + '\\\\s*\\\\(');
+  const start = src.search(re);
+  if (start < 0) throw new Error(name + ' not found');
+  let i = src.indexOf('{{', start);
+  let depth = 1; i++;
+  while (depth > 0 && i < src.length) {{
+    if (src[i] === '{{') depth++;
+    else if (src[i] === '}}') depth--;
+    i++;
+  }}
+  return src.slice(start, i);
+}}
+eval(extractFunc('_isChildSession'));
+eval(extractFunc('_sidebarLineageKeyForRow'));
+eval(extractFunc('_sessionDisplayTitle'));
+eval(extractFunc('_attachChildSessionsToSidebarRows'));
+const parentRow={{
+  session_id:'tip',
+  title:'Hermes WebUI #8',
+  _lineage_root_id:'root',
+  _lineage_segments:[
+    {{session_id:'tip', title:'Hermes WebUI #8', display_title:'Hermes WebUI #177'}},
+    {{session_id:'old-parent', title:'Hermes WebUI #8', display_title:'Hermes WebUI #176'}},
+  ],
+}};
+const child={{
+  session_id:'child',
+  title:'Child Session',
+  relationship_type:'child_session',
+  parent_session_id:'old-parent',
+}};
+const rows = _attachChildSessionsToSidebarRows([parentRow], [parentRow, child]);
+console.log(JSON.stringify(rows[0]._child_sessions[0]));
+"""
+    child = json.loads(_run_node(source))
+    assert child["_parent_segment_id"] == "old-parent"
+    assert child["_parent_segment_title"] == "Hermes WebUI #176"
+
+
+def test_default_webui_numbered_titles_are_not_treated_as_hash_tags():
+    """The reconciled title 'Hermes WebUI #177' must render with its number intact."""
+    js = SESSIONS_JS_PATH.read_text(encoding="utf-8")
+    source = f"""
+const src = {js!r};
+function extractFunc(name) {{
+  const re = new RegExp('function\\\\s+' + name + '\\\\s*\\\\(');
+  const start = src.search(re);
+  if (start < 0) throw new Error(name + ' not found');
+  let i = src.indexOf('{{', start);
+  let depth = 1; i++;
+  while (depth > 0 && i < src.length) {{
+    if (src[i] === '{{') depth++;
+    else if (src[i] === '}}') depth--;
+    i++;
+  }}
+  return src.slice(start, i);
+}}
+eval(extractFunc('_sessionTitleIsDefaultWebUI'));
+eval(extractFunc('_sessionTitleTags'));
+console.log(JSON.stringify({{
+  webui:_sessionTitleTags('Hermes WebUI #177'),
+  custom:_sessionTitleTags('Deploy #prod'),
+}}));
+"""
+    assert json.loads(_run_node(source)) == {"webui": [], "custom": ["#prod"]}
