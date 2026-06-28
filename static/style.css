@@ -2472,6 +2472,9 @@
     .mobile-overlay{display:none;position:fixed;inset:0;background:rgba(0,0,0,.5);
       z-index:199;-webkit-tap-highlight-color:transparent;}
     .mobile-overlay.visible{display:none;}
+    /* Keep edge guard aligned with the mobile titlebar's effective 52px height.
+       If this rule or app-titlebar sizing changes, update both together to
+       avoid accidental sidebar swipe collisions. */
     .pwa-sidebar-edge-guard{display:block;position:fixed;left:0;top:calc(52px + var(--app-titlebar-safe-top));bottom:0;width:24px;z-index:198;background:transparent;pointer-events:none;-webkit-user-select:none;user-select:none;-webkit-tap-highlight-color:transparent;}
     /* Files button in topbar */
     .workspace-toggle-btn,.mobile-files-btn{display:inline-flex!important;}
@@ -2621,6 +2624,8 @@
   @media (max-width: 640px){
     .panel-head-btn.mobile-sidebar-close{display:inline-flex!important;right:4px;top:calc(4px + var(--app-titlebar-safe-top));width:44px!important;height:44px!important;min-width:44px;min-height:44px;line-height:1;overflow:hidden;}
     .panel-head-btn.mobile-sidebar-close svg{width:18px;height:18px;display:block;}
+    /* Keep mobile send-button reveal motion off: avoids 0.18s pop-in in tight composer layouts,
+       which can jitter the 44px hit area while typing/scrolling. */
     .send-btn.visible{animation:none;opacity:1;transform:none;}
     /* Approval card */
     .approval-card{padding-left:10px;padding-right:10px;bottom:8px;overflow:visible;}
