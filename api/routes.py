@@ -7390,7 +7390,10 @@ def _claim_or_synthesize_cli_session(sid: str, cli_meta: dict = None):
     if (
         (
             _session_index_marks_was_webui(sid)
-            or _session_deleted_tombstone_marks_was_webui(sid)
+            or (
+                _session_deleted_tombstone_marks_was_webui(sid)
+                and _state_db_session_source(sid) in ("", "webui", "fork")
+            )
         )
         and not _is_subagent_child_session_id(sid)
     ):
@@ -7400,6 +7403,13 @@ def _claim_or_synthesize_cli_session(sid: str, cli_meta: dict = None):
         # Those must recover their transcript from state.db below rather than
         # 404 as a genuinely-deleted WebUI session (#5307). Every other
         # index-marked-WebUI id keeps the #2782 self-heal 404 contract.
+        #
+        # The durable delete tombstone only 404s a row that is WebUI-owned
+        # (source webui/fork, or blank = a stale URL with no surviving row).
+        # A foreign-source row (messaging/cli/tui/desktop) that happens to
+        # carry a tombstone — e.g. a WebUI delete of an imported session whose
+        # state.db row the external writer later re-created — must still
+        # materialize its transcript, never be self-healed to a 404 (#5504).
         return None, "was_webui"
     if cli_meta is None:
         cli_meta = _lookup_cli_session_metadata(sid) or {}

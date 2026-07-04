@@ -48,7 +48,9 @@ def test_recover_missing_sidecars_from_state_db_materializes_webui_row(tmp_path)
     assert [m["content"] for m in data["messages"]] == ["message 1", "message 2"]
 
 
-def test_recover_missing_sidecars_from_state_db_skips_deleted_webui_tombstone(tmp_path):
+def test_recover_missing_sidecars_from_state_db_skips_deleted_webui_tombstone(tmp_path, monkeypatch):
+    import api.models as _m
+    monkeypatch.setattr(_m, "SESSION_DIR", tmp_path)
     sid = _make_state_db(tmp_path / "state.db", sid="deleted_webui_001")
     _write_index(tmp_path, [
         {
@@ -58,14 +60,40 @@ def test_recover_missing_sidecars_from_state_db_skips_deleted_webui_tombstone(tm
             "session_source": "webui",
         }
     ])
+    # A genuine delete records the DURABLE tombstone; only that suppresses repair.
+    _m._record_webui_deleted_session_tombstone(sid)
+    try:
+        result = recover_missing_sidecars_from_state_db(tmp_path, tmp_path / "state.db")
+        assert result["materialized"] == 0
+        assert not (tmp_path / f"{sid}.json").exists()
+    finally:
+        _m._clear_webui_deleted_session_tombstone(sid)
 
+
+def test_recover_missing_sidecars_index_only_no_tombstone_is_repairable(tmp_path, monkeypatch):
+    """A crash that loses the sidecar (index intact, NO durable tombstone) must
+    still be recovered from state.db — the index heuristic alone must not
+    suppress repair (#5504 Codex/Opus finding; matches origin/master behavior)."""
+    import api.models as _m
+    monkeypatch.setattr(_m, "SESSION_DIR", tmp_path)
+    sid = _make_state_db(tmp_path / "state.db", sid="crashed_webui_001")
+    _write_index(tmp_path, [
+        {
+            "session_id": sid,
+            "source_tag": "webui",
+            "raw_source": "webui",
+            "session_source": "webui",
+        }
+    ])
+    # No durable tombstone recorded (this is a crash, not a delete).
     result = recover_missing_sidecars_from_state_db(tmp_path, tmp_path / "state.db")
+    assert result["materialized"] == 1
+    assert (tmp_path / f"{sid}.json").exists()
 
-    assert result["materialized"] == 0
-    assert not (tmp_path / f"{sid}.json").exists()
 
-
-def test_audit_reports_deleted_webui_tombstone_is_unsafe(tmp_path):
+def test_audit_reports_deleted_webui_tombstone_is_unsafe(tmp_path, monkeypatch):
+    import api.models as _m
+    monkeypatch.setattr(_m, "SESSION_DIR", tmp_path)
     sid = _make_state_db(tmp_path / "state.db", sid="deleted_webui_001")
     _write_index(tmp_path, [
         {
@@ -75,24 +103,27 @@ def test_audit_reports_deleted_webui_tombstone_is_unsafe(tmp_path):
             "session_source": "webui",
         }
     ])
+    _m._record_webui_deleted_session_tombstone(sid)
+    try:
+        report = audit_session_recovery(tmp_path, state_db_path=tmp_path / "state.db")
 
-    report = audit_session_recovery(tmp_path, state_db_path=tmp_path / "state.db")
-
-    assert any(
-        item["session_id"] == sid
-        and item["kind"] == "state_db_deleted_webui_tombstone"
-        and item["category"] == "unsafe_to_repair"
-        and item["recommendation"] == "deleted_session_skipped"
-        for item in report["items"]
-    )
-    assert not any(
-        item["session_id"] == sid and item["kind"] == "state_db_missing_sidecar"
-        for item in report["items"]
-    )
-    assert not any(
-        item["session_id"] == sid and item["category"] == "repairable"
-        for item in report["items"]
-    )
+        assert any(
+            item["session_id"] == sid
+            and item["kind"] == "state_db_deleted_webui_tombstone"
+            and item["category"] == "unsafe_to_repair"
+            and item["recommendation"] == "deleted_session_skipped"
+            for item in report["items"]
+        )
+        assert not any(
+            item["session_id"] == sid and item["kind"] == "state_db_missing_sidecar"
+            for item in report["items"]
+        )
+        assert not any(
+            item["session_id"] == sid and item["category"] == "repairable"
+            for item in report["items"]
+        )
+    finally:
+        _m._clear_webui_deleted_session_tombstone(sid)
 
 
 def test_recover_missing_sidecars_skips_durable_delete_tombstone_without_index(tmp_path, monkeypatch):

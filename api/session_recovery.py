@@ -330,6 +330,18 @@ def _orphaned_backup_live_paths(
         if _msg_count(bak_path) < 0:
             continue
         session_id = live_path.stem
+        # A WebUI session the user deleted must not be resurrected from its
+        # surviving .bak on the next boot (#5498). Use the DURABLE tombstone
+        # only — not the _index.json heuristic — so a genuine crash that loses
+        # the sidecar while its index entry survives is still restored (the
+        # crash-recovery case this helper exists for).
+        if _durable_tombstone_marks_deleted_webui_session(session_dir, session_id):
+            logger.info(
+                "recover_all_sessions_on_startup: skipped orphan backup %s; "
+                "session is tombstoned as a deleted WebUI session",
+                bak_path.name,
+            )
+            continue
         if not _state_db_has_session(session_id, state_db_path):
             logger.info(
                 "recover_all_sessions_on_startup: skipped orphan backup %s; "
@@ -383,7 +395,15 @@ def _read_state_db_missing_sidecar_rows(
                 sid = str(data.get('id') or '').strip()
                 if not sid or (session_dir / f"{sid}.json").exists():
                     continue
-                tombstoned = _marks_deleted_webui_session(session_dir, sid)
+                # Only the DURABLE delete tombstone suppresses state.db sidecar
+                # repair. The _index.json heuristic must NOT gate this path: a
+                # genuine crash that loses the sidecar while its index entry
+                # survives (no durable tombstone) is exactly the case this repair
+                # exists for, and on master it materialized the sidecar. Using
+                # _marks_deleted_webui_session() here (which ORs in the index
+                # heuristic) wrongly classified that crash as a delete and
+                # stopped recovery (#5504 Codex/Opus finding).
+                tombstoned = _durable_tombstone_marks_deleted_webui_session(session_dir, sid)
                 if tombstoned and not include_empty:
                     continue
                 message_rows: list[dict] = []
@@ -694,8 +714,20 @@ def audit_session_recovery(session_dir: Path, state_db_path: Path | None = None)
             items.append(_new_audit_item(
                 session_id, "malformed_orphan_backup", "unsafe_to_repair", "manual_review", -1, bak_messages
             ))
-        elif _marks_deleted_webui_session(session_dir, session_id):
-            continue
+        elif _durable_tombstone_marks_deleted_webui_session(session_dir, session_id):
+            # The user deleted this WebUI session; its surviving .bak must NOT be
+            # reported as repairable. DURABLE tombstone only — the _index.json
+            # heuristic must not suppress a genuine crash whose index survived
+            # (that case is legitimately repairable). Matches the startup-recovery
+            # skip + the state.db recovery path (#5504 Codex/Opus finding).
+            items.append(_new_audit_item(
+                session_id,
+                "state_db_deleted_webui_tombstone",
+                "unsafe_to_repair",
+                "deleted_session_skipped",
+                -1,
+                bak_messages,
+            ))
         elif _state_db_has_session(session_id, state_db_path):
             items.append(_new_audit_item(
                 session_id, "orphan_backup", "repairable", "restore_from_bak", -1, bak_messages
