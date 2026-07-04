@@ -147,6 +147,41 @@ def test_audit_skips_index_missing_file_when_durable_delete_tombstone_survives(t
     )
 
 
+def test_audit_skips_orphan_backup_when_durable_delete_tombstone_survives(tmp_path, monkeypatch):
+    import api.models as _m
+
+    sid = _make_state_db(tmp_path / "state.db", sid="durable_deleted_backup_001")
+    (tmp_path / f"{sid}.json.bak").write_text(
+        json.dumps(
+            {
+                "session_id": sid,
+                "messages": [{"role": "user", "content": "deleted"}],
+            }
+        ),
+        encoding="utf-8",
+    )
+    monkeypatch.setattr(_m, "SESSION_DIR", tmp_path)
+    _m._record_webui_deleted_session_tombstone(sid)
+
+    report = audit_session_recovery(tmp_path, state_db_path=tmp_path / "state.db")
+
+    assert any(
+        item["session_id"] == sid
+        and item["kind"] == "state_db_deleted_webui_tombstone"
+        and item["category"] == "unsafe_to_repair"
+        and item["recommendation"] == "deleted_session_skipped"
+        for item in report["items"]
+    )
+    assert not any(
+        item["session_id"] == sid and item["kind"] == "orphan_backup"
+        for item in report["items"]
+    )
+    assert not any(
+        item["session_id"] == sid and item["category"] == "repairable"
+        for item in report["items"]
+    )
+
+
 def test_recover_missing_sidecars_from_state_db_skips_existing_sidecar(tmp_path):
     sid = _make_state_db(tmp_path / "state.db")
     existing = tmp_path / f"{sid}.json"

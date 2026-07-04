@@ -694,6 +694,8 @@ def audit_session_recovery(session_dir: Path, state_db_path: Path | None = None)
             items.append(_new_audit_item(
                 session_id, "malformed_orphan_backup", "unsafe_to_repair", "manual_review", -1, bak_messages
             ))
+        elif _marks_deleted_webui_session(session_dir, session_id):
+            continue
         elif _state_db_has_session(session_id, state_db_path):
             items.append(_new_audit_item(
                 session_id, "orphan_backup", "repairable", "restore_from_bak", -1, bak_messages
