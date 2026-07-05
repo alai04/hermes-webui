@@ -2998,7 +2998,6 @@ window._mirrorSpeechSettingsFromServer=_mirrorSpeechSettingsFromServer;
     // closure-local to the voice-mode IIFE and not visible here.
     if(typeof window._applyVoiceModePref==='function') window._applyVoiceModePref();
     _applyComposerFooterVisibilitySettings();
-    if(typeof window._applyVoiceModePref==='function') window._applyVoiceModePref();
     // TTS: apply enabled state on boot so buttons show/hide correctly (#499)
     if(typeof _applyTtsEnabled==='function') _applyTtsEnabled(localStorage.getItem('hermes-tts-enabled')==='true');
   }catch(e){
