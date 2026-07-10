@@ -98,6 +98,52 @@ def test_atomic_write_preserves_existing_group(tmp_path: Path) -> None:
     assert os.stat(target).st_gid == expected_gid
 
 
+@pytest.mark.skipif(not hasattr(os, "fchown"), reason="POSIX ownership semantics")
+def test_fchown_denial_falls_back_without_temp_debris(
+    tmp_path: Path, monkeypatch
+) -> None:
+    """A writer unable to transfer ownership must keep the old inode contract."""
+    target = tmp_path / "config.yaml"
+    target.write_text("old: true\n", encoding="utf-8")
+
+    def _deny_fchown(*_args) -> None:
+        raise PermissionError("simulated ownership denial")
+
+    monkeypatch.setattr(os, "fchown", _deny_fchown)
+
+    _atomic_write_text(target, "new: true\n")
+
+    assert target.read_text(encoding="utf-8") == "new: true\n"
+    assert [p.name for p in tmp_path.iterdir()] == ["config.yaml"]
+
+
+def test_atomic_write_without_posix_fd_metadata_helpers(
+    tmp_path: Path, monkeypatch
+) -> None:
+    """Windows-like platforms still use same-directory atomic replacement."""
+    target = tmp_path / "config.yaml"
+    target.write_text("old: true\n", encoding="utf-8")
+    replace_calls: list[tuple[Path, Path]] = []
+    real_replace = os.replace
+
+    monkeypatch.delattr(os, "fchown", raising=False)
+    monkeypatch.delattr(os, "fchmod", raising=False)
+
+    def _recording_replace(src, dst) -> None:
+        replace_calls.append((Path(src), Path(dst)))
+        real_replace(src, dst)
+
+    monkeypatch.setattr(os, "replace", _recording_replace)
+
+    _atomic_write_text(target, "new: true\n")
+
+    assert target.read_text(encoding="utf-8") == "new: true\n"
+    assert len(replace_calls) == 1
+    assert replace_calls[0][0].parent == target.parent
+    assert replace_calls[0][1] == target
+    assert [p.name for p in tmp_path.iterdir()] == ["config.yaml"]
+
+
 def test_atomic_write_fsyncs_file_and_parent_directory(
     tmp_path: Path, monkeypatch
 ) -> None:
@@ -393,7 +439,9 @@ def test_failed_write_through_symlink_leaves_link_and_target_intact(
     assert [p.name for p in target_dir.iterdir()] == ["config.yaml"]
 
 
-@pytest.mark.parametrize("writer", ["main", "profile_endpoint", "profile_defaults"])
+@pytest.mark.parametrize(
+    "writer", ["main", "onboarding", "profile_endpoint", "profile_defaults"]
+)
 def test_each_config_writer_preserves_old_bytes_when_replace_fails(
     tmp_path: Path, monkeypatch, writer: str
 ) -> None:
@@ -412,6 +460,12 @@ def test_each_config_writer_preserves_old_bytes_when_replace_fails(
             from api import config
 
             config._save_yaml_config_file(target, {"model": {"default": "new"}})
+        elif writer == "onboarding":
+            from api import onboarding
+
+            onboarding._save_yaml_config(
+                target, {"model": {"default": "replacement-model"}}
+            )
         else:
             from api import profiles
 
@@ -426,7 +480,8 @@ def test_each_config_writer_preserves_old_bytes_when_replace_fails(
 
 
 _ROOT_SKIP = pytest.mark.skipif(
-    os.geteuid() == 0, reason="root bypasses directory permission bits"
+    getattr(os, "geteuid", lambda: -1)() == 0,
+    reason="root bypasses directory permission bits",
 )
 
 
