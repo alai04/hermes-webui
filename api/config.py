@@ -3267,17 +3267,33 @@ def _is_pre_adaptive_anthropic(bare_model: str) -> bool:
     """True for Claude models that predate the adaptive-thinking (4.6+) generation.
 
     Adaptive models (Opus/Sonnet 4.6+, 4.7, …) accept 'max'; earlier manual-thinking
-    Claudes (3.5/3.7/4.0–4.5) do not and must degrade 'max' to xhigh rather than
+    Claudes (3.x and 4.0–4.5) do not and must degrade 'max' to xhigh rather than
     fall through the manual-thinking budget table to its 8k default.
+
+    Handles the ID shapes the Anthropic adapter uses:
+      - claude-3-opus / claude-3-5-sonnet / claude-3-7-sonnet   → pre-adaptive
+      - claude-sonnet-4-5 / claude-haiku-4-5                     → pre-adaptive (4.5)
+      - claude-sonnet-4-20250514 (date-stamped 4.0 build)        → pre-adaptive
+      - claude-opus-4.6 / claude-sonnet-4.6 / claude-opus-4.7    → adaptive
+      - claude-opus-latest / unversioned                        → adaptive (flagship)
     """
+    import re as _re
     m = (bare_model or "").lower()
     if "claude" not in m:
         return False
-    # Extract a version like 4.6 / 4-5 / 3.7 from the model name.
-    import re as _re
-    match = _re.search(r"(\d+)[.\-](\d+)", m)
+    # Claude 3.x family is always pre-adaptive.
+    if _re.search(r"claude-3\b", m) or _re.search(r"claude-3[.\-]", m):
+        return True
+    # Find a major[.-]minor version. A date-stamp (>=6 digits) is NOT a minor
+    # version — treat "4-20250514" as major 4 with no real minor (a 4.0 build).
+    match = _re.search(r"(\d+)[.\-](\d{1,2})(?!\d)", m)
     if not match:
-        # Unversioned/opus-latest style — treat as adaptive (current flagship).
+        # A bare major like "claude-sonnet-4" or "...-4-20250514" (date stamp
+        # consumed no minor): major-4 with no minor is a pre-adaptive 4.0 build.
+        major_only = _re.search(r"[-.](\d+)(?:[-.]\d{6,})?(?:\b|-)", m)
+        if major_only:
+            return int(major_only.group(1)) < 5  # 4.x (no minor) → pre-adaptive; ≥5 → adaptive
+        # Unversioned / *-latest → treat as current flagship (adaptive).
         return False
     major, minor = int(match.group(1)), int(match.group(2))
     return (major, minor) < (4, 6)

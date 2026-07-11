@@ -342,7 +342,12 @@ def test_max_effort_degrades_to_xhigh_for_gemini():
 def test_max_effort_degrades_to_xhigh_for_pre_adaptive_anthropic():
     # Pre-adaptive Claude (3.7 / 4.0-4.5) uses manual thinking whose budget table
     # lacks 'max' and falls back to 8k; 'max' must degrade to xhigh instead. (#4627 gate)
-    for model in ("claude-3-7-sonnet", "claude-sonnet-4-5"):
+    for model in (
+        "claude-3-7-sonnet", "claude-sonnet-4-5", "claude-haiku-4-5",
+        # date-stamped legacy IDs the Anthropic adapter uses
+        "claude-3-opus-20240229", "claude-3-5-sonnet-20241022",
+        "claude-sonnet-4-20250514", "claude-opus-4-20250514",
+    ):
         assert cfg.coerce_reasoning_effort_for_model(
             "max", model_id=model, provider_id="anthropic"
         ) == "xhigh", f"{model} max must degrade to xhigh"
@@ -350,7 +355,7 @@ def test_max_effort_degrades_to_xhigh_for_pre_adaptive_anthropic():
 
 def test_max_effort_preserved_for_adaptive_anthropic_and_deepseek():
     # Adaptive Claude (4.6+) and DeepSeek genuinely support 'max' — it must NOT degrade.
-    for model in ("claude-opus-4.6", "claude-opus-4.7"):
+    for model in ("claude-opus-4.6", "claude-sonnet-4.6", "claude-opus-4.7", "claude-opus-latest"):
         assert cfg.coerce_reasoning_effort_for_model(
             "max", model_id=model, provider_id="anthropic"
         ) == "max", f"{model} must preserve max"
