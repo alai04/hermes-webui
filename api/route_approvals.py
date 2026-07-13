@@ -148,6 +148,8 @@ def reconcile_gateway_pending_mirror_locked(session_key: str) -> tuple[dict | No
     live_head_entry = live_gateway_queue[0] if live_gateway_queue else None
     live_head_data = getattr(live_head_entry, "data", None) or {}
     live_token = _gateway_mirror_entry_token(live_head_entry) if live_head_entry and live_head_data else None
+    live_run_id = str(live_head_data.get("run_id") or "").strip()
+    live_approval_id = str(live_head_data.get("approval_id") or "").strip()
 
     rebuilt: list[dict] = []
     live_mirror_present = False
@@ -155,13 +157,40 @@ def reconcile_gateway_pending_mirror_locked(session_key: str) -> tuple[dict | No
         if not _is_gateway_mirror_entry(entry):
             rebuilt.append(entry)
             continue
-        if str(entry.get("run_id") or "").strip():
-            rebuilt.append(entry)
+        entry_run_id = str(entry.get("run_id") or "").strip()
+        entry_approval_id = str(entry.get("approval_id") or "").strip()
+        entry_token = str(entry.get(_GATEWAY_MIRROR_TOKEN) or "").strip()
+        matches_live_head = False
+        if live_token:
+            if entry_token and entry_token == live_token:
+                matches_live_head = True
+            elif live_run_id and entry_run_id == live_run_id:
+                matches_live_head = True
+            elif live_approval_id and entry_approval_id == live_approval_id:
+                matches_live_head = True
+
+        if entry_run_id:
+            if matches_live_head and not live_mirror_present:
+                if entry_token != live_token:
+                    entry[_GATEWAY_MIRROR_TOKEN] = live_token
+                    changed = True
+                rebuilt.append(entry)
+                live_mirror_present = True
+                continue
+            if not entry_token:
+                rebuilt.append(entry)
+                continue
+            changed = True
             continue
-        if live_token and entry.get(_GATEWAY_MIRROR_TOKEN) == live_token and not live_mirror_present:
+
+        if matches_live_head and not live_mirror_present:
+            if entry_token != live_token:
+                entry[_GATEWAY_MIRROR_TOKEN] = live_token
+                changed = True
             rebuilt.append(entry)
             live_mirror_present = True
             continue
+
         changed = True
 
     if live_token and not live_mirror_present:

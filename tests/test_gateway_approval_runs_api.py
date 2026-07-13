@@ -426,13 +426,14 @@ def test_empty_id_runs_approval_reaches_real_response_lifecycle():
     import api.routes as routes
 
     for choice in ("once", "deny"):
+        choice_bytes = choice.encode()
         sid = f"sess-real-{choice}"
         stream_id = f"stream-real-{choice}"
         events = []
 
         class _JsonResponse:
-            def read(self, _limit=None):
-                return b'{"run_id":"run-real-' + choice.encode() + b'"}'
+            def read(self, _limit=None, _choice_bytes=choice_bytes):
+                return b'{"run_id":"run-real-' + _choice_bytes + b'"}'
             def __enter__(self):
                 return self
             def __exit__(self, *args):
@@ -462,7 +463,7 @@ def test_empty_id_runs_approval_reaches_real_response_lifecycle():
              patch("api.runner_client.HttpRunnerClient._request_json", return_value={"ok": True}):
             _run_gateway_runs_api_streaming(
                 sid, "hi", "test", "/tmp", stream_id, "http://gw:8642", "", [], {},
-                put_gateway_event=lambda event, data: events.append((event, data)),
+                put_gateway_event=lambda event, data, _events=events: _events.append((event, data)),
                 cancel_event=threading.Event(),
             )
             approval_id = events[0][1]["approval_id"]
