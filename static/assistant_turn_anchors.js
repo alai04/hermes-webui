@@ -1048,6 +1048,51 @@
     });
   }
 
+  function projectAssistantTurnAnchorHistoricalTranscriptScene(input, options){
+    const item=(input&&typeof input==='object')?input:{};
+    const sessionId=_cleanString(_own(item,'session_id'));
+    const turnId=_cleanString(_own(item,'turn_id'));
+    const localId=_cleanString(_own(item,'local_id'));
+    const activityEvents=Array.isArray(_own(item,'activity_events'))?_own(item,'activity_events'):[];
+    const settledMessage=_own(item,'settled_message');
+    if(!sessionId||!turnId||!localId||!activityEvents.length
+      ||!settledMessage||typeof settledMessage!=='object') return null;
+    const runId=_cleanString(_own(item,'run_id'))||null;
+    const streamId=_cleanString(_own(item,'stream_id'))||null;
+    const sourceMessageRefs=Array.isArray(_own(item,'source_message_refs'))
+      ?_own(item,'source_message_refs').map(_cleanString).filter(Boolean)
+      :[];
+    const registry=createAssistantTurnAnchorRegistry({
+      session_id:sessionId,
+      turn_id:turnId,
+      run_id:runId,
+      stream_id:streamId,
+      local_id:localId,
+      source_message_refs:sourceMessageRefs,
+    });
+    const context={
+      session_id:sessionId,
+      turn_id:turnId,
+      run_id:runId,
+      stream_id:streamId,
+    };
+    for(const event of activityEvents){
+      const result=applyAssistantTurnAnchorSourceEvent(registry,event,context);
+      if(!result.applied||result.normalized.classification!=='activity') return null;
+    }
+    const settledPayload={...settledMessage,role:_cleanString(_own(settledMessage,'role'))||'assistant'};
+    const settled=applyAssistantTurnAnchorSourceEvent(registry,{
+      source_type:'settled_message',
+      seq:activityEvents.length+1,
+      local_id:localId,
+      payload:settledPayload,
+    },context);
+    if(!settled.applied) return null;
+    const opts=(options&&typeof options==='object')?options:{};
+    const requestedMode=_cleanString(_own(opts,'mode'))||_cleanString(_own(item,'mode'));
+    return projectAssistantTurnAnchorActivityScene(registry,{mode:requestedMode});
+  }
+
   const ACTIVITY_RECONCILIATION_DEFAULT_FIELDS=Object.freeze([
     'kind',
     'role',
@@ -1648,6 +1693,7 @@
     createAssistantTurnAnchorShadowSnapshot,
     projectAssistantTurnAnchorSettledMessageFinalAnswer,
     projectAssistantTurnAnchorActivityScene,
+    projectAssistantTurnAnchorHistoricalTranscriptScene,
     reconcileAssistantTurnAnchorActivityScene,
     createAssistantTurnAnchorRendererSnapshot,
     reconcileAssistantTurnAnchorRendererSnapshot,
