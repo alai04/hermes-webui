@@ -396,6 +396,11 @@ def test_gateway_mirrored_approval_without_run_retires_locally():
         resp = handler.json()
         assert handler.status == 200, f"expected 200, got {handler.status}: {resp}"
         assert resp == {"ok": True, "choice": "once", "local_retired": True}
+        assert entry.event.is_set()
+        assert entry.result == "once"
+        with ta._lock:
+            assert sid not in ta._pending
+            assert sid not in ta._gateway_queues
     finally:
         _cleanup(sid)
 

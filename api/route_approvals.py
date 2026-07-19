@@ -47,6 +47,7 @@ _approval_sse_subscribers: dict[str, list[queue.Queue]] = {}
 _GATEWAY_MIRROR_FLAG = "_gateway_mirror"
 _GATEWAY_MIRROR_TOKEN = "_gateway_mirror_token"
 _GATEWAY_ENTRY_DATA_TOKEN_KEY = "_webui_mirror_token"
+_GATEWAY_AGENT_IDENTITY_V1 = "_gateway_agent_identity_v1"
 
 
 def _approval_sse_subscribe(session_id: str) -> queue.Queue:
@@ -323,6 +324,10 @@ def retire_gateway_pending_mirror(session_key: str, approval_id: str = "", run_i
         gateway_queue_changed = False
         if approval_id:
             match = _gateway_pending_mirror_locked(session_key, approval_id, run_id)
+            if match is None and not normalized_run_id:
+                match = next((entry for entry in entries if _is_gateway_mirror_entry(entry)
+                              and not str(entry.get("run_id") or "").strip()
+                              and str(entry.get("approval_id") or "").strip() == approval_id), None)
             retired = [match] if match else []
         else:
             retired = [

@@ -24006,6 +24006,7 @@ def _handle_approval_respond(handler, body):
             webui_gateway_chat_enabled,
         )
         from api.config import get_config as _get_config, gateway_supports_approval_identity_v1
+        from api.route_approvals import _GATEWAY_AGENT_IDENTITY_V1
         s = get_session(sid)
         _candidate_run_id = None
         if s is not None:
@@ -24112,7 +24113,7 @@ def _handle_approval_respond(handler, body):
             _base = _gateway_base_url(_cfg)
             _key = _gateway_api_key()
             try:
-                identity_v1 = gateway_supports_approval_identity_v1(_base, _key)
+                identity_v1 = bool(matched_mirror.get(_GATEWAY_AGENT_IDENTITY_V1)) and gateway_supports_approval_identity_v1(_base, _key)
                 HttpRunnerClient(base_url=_base, api_key=_key).respond_approval(
                     _run_id, matched_mirror["approval_id"] if identity_v1 else "", choice
                 )
@@ -24134,6 +24135,7 @@ def _handle_approval_respond(handler, body):
         if webui_gateway_chat_enabled(_get_config()) and _gateway_pending_approval_without_run_id(
             sid, approval_id
         ):
+            resolve_gateway_pending_local(sid, approval_id, choice)
             retire_gateway_pending_mirror(sid, approval_id=approval_id)
             return j(handler, {"ok": True, "choice": choice, "local_retired": True})
     except Exception:

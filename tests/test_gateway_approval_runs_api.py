@@ -2135,6 +2135,29 @@ def test_gateway_approval_response_relay():
     approvals._pending.pop("sess-relay", None)
 
 
+def test_synthetic_gateway_identity_stays_fifo_after_capability_upgrade():
+    """A local gwrun ID never becomes remote authority after a capability refresh."""
+    from api import routes
+    from api.gateway_chat import _STREAM_RUN_IDS
+    import api.route_approvals as approvals
+
+    _STREAM_RUN_IDS["sid-upgrade"] = "run-upgrade"
+    approvals.submit_gateway_pending_mirror("sess-upgrade", {
+        "run_id": "run-upgrade", "approval_id": "gwrun:run-upgrade:local", "command": "echo x"
+    })
+    handler = MagicMock()
+    handler.wfile = io.BytesIO()
+    with patch("api.routes.get_session", return_value=SimpleNamespace(active_stream_id="sid-upgrade")), \
+         patch("api.config.gateway_supports_approval_identity_v1", return_value=True), \
+         patch("api.runner_client.HttpRunnerClient.respond_approval") as respond:
+        routes._handle_approval_respond(handler, {
+            "session_id": "sess-upgrade", "choice": "once", "approval_id": "gwrun:run-upgrade:local",
+        })
+    respond.assert_called_once_with("run-upgrade", "", "once")
+    _STREAM_RUN_IDS.pop("sid-upgrade", None)
+    approvals._pending.pop("sess-upgrade", None)
+
+
 def test_gateway_approval_response_without_approval_id_409s():
     """Gateway relay requires the emitted per-approval id, not bare run state."""
     from api.gateway_chat import _STREAM_RUN_IDS
