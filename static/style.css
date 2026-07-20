@@ -7242,6 +7242,7 @@ html[data-conversation-outline="enabled"] #outlineToggleBtn:not([hidden]){displa
 
 /* ── Portfolio panel ── */
 main.main.showing-portfolio > #mainPortfolio { display: flex; }
+#mainPortfolio .main-view-content { max-width: none; }
 #portfolioContainer { width: 100%; }
 .pf-loading { color: var(--muted); font-size: 13px; padding: 16px; }
 .pf-updated-label { font-size: 11px; color: var(--muted); white-space: nowrap; }

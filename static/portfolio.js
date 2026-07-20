@@ -40,9 +40,13 @@ function renderPortfolioTable(holdings) {
 
   const { rows, totalUsdValue } = _calcPortfolioRows(holdings);
 
+  const rowsWithWeight = rows
+    .map(r => ({ ...r, weight: totalUsdValue > 0 ? (r.usdValue / totalUsdValue) * 100 : 0 }))
+    .sort((a, b) => b.weight - a.weight);
+
   let tbodyHtml = '';
-  for (const r of rows) {
-    const weight = totalUsdValue > 0 ? (r.usdValue / totalUsdValue) * 100 : 0;
+  for (const r of rowsWithWeight) {
+    const weight = r.weight;
     tbodyHtml += `
       <tr>
         <td class="pf-symbol">${r.symbol}</td>
