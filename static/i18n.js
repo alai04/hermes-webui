@@ -1058,6 +1058,7 @@ const LOCALES = {
     tab_dashboard: 'Hermes Dashboard',
     dashboard_loopback_warning: 'Dashboard is loopback-only on the server. Either browse from the server itself or restart it with --host 0.0.0.0 (insecure).',
     tab_logs: 'Logs',
+    tab_portfolio: 'Portfolio',
     tab_settings: 'Settings',
     close_menu: 'Close menu',
     new_conversation: 'New conversation',

@@ -61,6 +61,7 @@ from api.session_events import (
 )
 from api.gateway_restart import restart_active_profile_gateway
 from api.shares import create_or_refresh_share, load_share, revoke_share
+from api.portfolio import handle_portfolio_get, handle_portfolio_post
 
 logger = logging.getLogger(__name__)
 
@@ -12238,6 +12239,9 @@ def handle_get(handler, parsed) -> bool:
             # failure → clean 404, never a 500.
             return bad(handler, "Could not read page", status=404)
         return j(handler, {"content": content, "path": page_path})
+    if parsed.path == "/api/portfolio":
+        return handle_portfolio_get(handler, parsed)
+
     if parsed.path == "/api/logs":
         return _handle_logs(handler, parsed)
 
@@ -13881,6 +13885,9 @@ def handle_post(handler, parsed) -> bool:
         if diag:
             diag.finish()
         return True
+
+    if parsed.path == "/api/portfolio":
+        return handle_portfolio_post(handler, body)
 
     if parsed.path == "/api/escape/authorize":
         return _handle_escape_authorize(handler, parsed, body)
