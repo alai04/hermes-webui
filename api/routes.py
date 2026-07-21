@@ -13378,20 +13378,17 @@ def handle_get(handler, parsed) -> bool:
             return True
         gateway_stop_blocked = False
         try:
-            from api.gateway_chat import _STREAM_RUN_IDS, gateway_run_id_pending, stop_gateway_run
+            from api.gateway_chat import (
+                GATEWAY_RUN_ID_WAIT_TIMEOUT,
+                stop_gateway_run,
+                wait_for_gateway_run_id,
+            )
 
-            run_id = _STREAM_RUN_IDS.get(stream_id)
-            pending_run_id = False
-            if not run_id:
-                pending_run_id = gateway_run_id_pending(stream_id)
-                if pending_run_id:
-                    cancel_flag = CANCEL_FLAGS.get(stream_id)
-                    if cancel_flag:
-                        cancel_flag.set()
-                    cancelled = cancel_stream(stream_id)
-                    return j(handler, {"ok": True, "cancelled": cancelled, "deferred": True, "stream_id": stream_id})
+            structured_gateway, run_id = wait_for_gateway_run_id(stream_id, GATEWAY_RUN_ID_WAIT_TIMEOUT)
+            if not run_id and structured_gateway:
+                gateway_stop_blocked = True
             if run_id:
-                if stop_gateway_run(stream_id):
+                if stop_gateway_run(run_id):
                     owner_sid = stream_owner_session_id(stream_id)
                     if owner_sid:
                         retire_gateway_pending_mirror(owner_sid, run_id=run_id)

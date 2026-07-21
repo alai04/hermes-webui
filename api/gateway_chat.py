@@ -41,12 +41,64 @@ logger = logging.getLogger(__name__)
 # Maps stream_id -> gateway run_id for approval response relay.
 _STREAM_RUN_IDS: dict[str, str] = {}
 _STREAM_RUN_STARTING: set[str] = set()
-_STREAM_RUN_STARTING_LOCK = threading.Lock()
+_STREAM_RUN_START_RESULTS: dict[str, str] = {}
+_STREAM_RUN_STARTING_CONDITION = threading.Condition()
+GATEWAY_RUN_ID_WAIT_TIMEOUT = 5.0
+
+
+def _mark_gateway_run_starting(stream_id: str) -> None:
+    with _STREAM_RUN_STARTING_CONDITION:
+        _STREAM_RUN_STARTING.add(stream_id)
+        _STREAM_RUN_START_RESULTS.pop(stream_id, None)
+
+
+def _publish_gateway_run_id(stream_id: str, run_id: str) -> None:
+    with _STREAM_RUN_STARTING_CONDITION:
+        _STREAM_RUN_IDS[stream_id] = run_id
+        _STREAM_RUN_STARTING.discard(stream_id)
+        _STREAM_RUN_START_RESULTS.pop(stream_id, None)
+        _STREAM_RUN_STARTING_CONDITION.notify_all()
+
+
+def _finish_gateway_run_starting(stream_id: str, *, result: str = "failed") -> None:
+    with _STREAM_RUN_STARTING_CONDITION:
+        _STREAM_RUN_STARTING.discard(stream_id)
+        _STREAM_RUN_START_RESULTS[stream_id] = result
+        _STREAM_RUN_STARTING_CONDITION.notify_all()
+
+
+def _clear_gateway_run_starting(stream_id: str) -> None:
+    with _STREAM_RUN_STARTING_CONDITION:
+        _STREAM_RUN_STARTING.discard(stream_id)
+        _STREAM_RUN_START_RESULTS.pop(stream_id, None)
+        _STREAM_RUN_STARTING_CONDITION.notify_all()
 
 
 def gateway_run_id_pending(stream_id: str) -> bool:
-    with _STREAM_RUN_STARTING_LOCK:
+    with _STREAM_RUN_STARTING_CONDITION:
         return stream_id in _STREAM_RUN_STARTING
+
+
+def wait_for_gateway_run_id(stream_id: str, timeout: float) -> tuple[bool, str | None]:
+    with _STREAM_RUN_STARTING_CONDITION:
+        run_id = str(_STREAM_RUN_IDS.get(stream_id) or "").strip()
+        if run_id:
+            return True, run_id
+        if stream_id not in _STREAM_RUN_STARTING:
+            result = str(_STREAM_RUN_START_RESULTS.get(stream_id) or "").strip()
+            return bool(result) and result != "fallback", None
+        _STREAM_RUN_STARTING_CONDITION.wait_for(
+            lambda: stream_id not in _STREAM_RUN_STARTING
+            or bool(str(_STREAM_RUN_IDS.get(stream_id) or "").strip()),
+            timeout=max(0.0, float(timeout)),
+        )
+        run_id = str(_STREAM_RUN_IDS.get(stream_id) or "").strip()
+        if run_id:
+            return True, run_id
+        if stream_id in _STREAM_RUN_STARTING:
+            return True, None
+        result = str(_STREAM_RUN_START_RESULTS.get(stream_id) or "").strip()
+        return bool(result) and result != "fallback", None
 
 _WEBUI_CHAT_BACKEND_ENV = "HERMES_WEBUI_CHAT_BACKEND"
 _WEBUI_GATEWAY_BASE_URL_ENV = "HERMES_WEBUI_GATEWAY_BASE_URL"
@@ -379,8 +431,7 @@ def _run_gateway_runs_api_streaming(
     attachments=None, cfg=None, session=None,
 ):
     """Submit via POST /v1/runs and relay SSE events including approval."""
-    with _STREAM_RUN_STARTING_LOCK:
-        _STREAM_RUN_STARTING.add(stream_id)
+    _mark_gateway_run_starting(stream_id)
     try:
         url_runs = f"{base_url.rstrip('/')}/v1/runs"
         headers = {
@@ -456,25 +507,11 @@ def _run_gateway_runs_api_streaming(
         if not run_id:
             raise ValueError(f"Gateway runs API returned no run_id: {run_data!r}")
     except Exception:
-        with _STREAM_RUN_STARTING_LOCK:
-            _STREAM_RUN_STARTING.discard(stream_id)
+        _finish_gateway_run_starting(stream_id)
         raise
 
     usage: dict = {}
-    _STREAM_RUN_IDS[stream_id] = run_id
-    with _STREAM_RUN_STARTING_LOCK:
-        _STREAM_RUN_STARTING.discard(stream_id)
-    if cancel_event.is_set():
-        stop_confirmed = False
-        try:
-            stop_confirmed = stop_gateway_run(stream_id)
-        except Exception:
-            logger.debug("Failed to stop gateway run after pre-stream cancellation", exc_info=True)
-        if stop_confirmed:
-            put_gateway_event("cancel", {"message": "Cancelled by user"})
-            return None, usage
-        put_gateway_event("apperror", {"message": "Gateway stop failed"})
-        return None, usage
+    _publish_gateway_run_id(stream_id, run_id)
 
     url_events = f"{base_url.rstrip('/')}/v1/runs/{run_id}/events"
     headers_sse = dict(headers)
@@ -592,9 +629,9 @@ def _run_gateway_runs_api_streaming(
     return final_text, usage
 
 
-def stop_gateway_run(stream_id: str) -> bool:
+def stop_gateway_run(run_id: str) -> bool:
     """Request gateway interruption and report whether it was acknowledged."""
-    run_id = str(_STREAM_RUN_IDS.get(stream_id) or "").strip()
+    run_id = str(run_id or "").strip()
     if not run_id:
         return False
     from api.config import get_config
@@ -816,13 +853,11 @@ def _run_gateway_chat_streaming(
             _gw_overrides = {}
         _runs_api_enabled = _gateway_use_runs_api_enabled(cfg)
         if _runs_api_enabled:
-            with _STREAM_RUN_STARTING_LOCK:
-                _STREAM_RUN_STARTING.add(stream_id)
+            _mark_gateway_run_starting(stream_id)
             runs_api_pending_marked = True
         _use_runs_api = _runs_api_enabled and gateway_supports_approval(base_url, api_key)
         if not _use_runs_api and runs_api_pending_marked:
-            with _STREAM_RUN_STARTING_LOCK:
-                _STREAM_RUN_STARTING.discard(stream_id)
+            _finish_gateway_run_starting(stream_id, result="fallback")
             runs_api_pending_marked = False
         try:
             from api.streaming import (
