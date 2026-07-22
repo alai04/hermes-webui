@@ -1883,6 +1883,77 @@ def test_chat_cancel_waits_for_worker_published_run_id_before_settlement(
         _reset_gateway_run_start_state(stream_id)
 
 
+def test_gateway_worker_prelude_exception_retires_failed_start_after_waiter_consumes():
+    import time
+
+    from api import gateway_chat
+
+    stream_id = "stream-start-prelude-exception"
+    sid = "sess-start-prelude-exception"
+    wait_for_gateway_run_id = gateway_chat.wait_for_gateway_run_id
+    mark_starting = gateway_chat._mark_gateway_run_starting
+    lifecycle = gateway_chat._STREAM_RUN_LIFECYCLE
+    run_ids = gateway_chat._STREAM_RUN_IDS
+    observed = {}
+    waiter_thread = None
+    session = SimpleNamespace(
+        profile=None,
+        workspace="/tmp",
+        context_messages=[],
+        messages=[],
+        active_stream_id=stream_id,
+        pending_user_source="webui",
+        process_wakeup_pause={},
+        pending_started_at=time.time(),
+        save=lambda: None,
+        title="title",
+    )
+
+    def waiter():
+        observed["result"] = wait_for_gateway_run_id(stream_id, 1.0)
+
+    worker_thread = threading.Thread(
+        target=gateway_chat._run_gateway_chat_streaming,
+        kwargs={
+            "session_id": sid,
+            "msg_text": "hi",
+            "model": "test-model",
+            "workspace": "/tmp",
+            "stream_id": stream_id,
+        },
+        daemon=True,
+    )
+
+    try:
+        gateway_chat.STREAMS[stream_id] = SimpleNamespace(put_nowait=lambda *_args, **_kwargs: None)
+        mark_starting(stream_id)
+        waiter_thread = threading.Thread(target=waiter, daemon=True)
+        waiter_thread.start()
+        deadline = time.time() + 5
+        while time.time() < deadline:
+            if int((lifecycle.get(stream_id) or {}).get("waiters") or 0) == 1:
+                break
+            time.sleep(0.01)
+        assert int((lifecycle.get(stream_id) or {}).get("waiters") or 0) == 1
+        with patch("api.gateway_chat.RunJournalWriter", return_value=SimpleNamespace(append_sse_event=lambda *_a, **_k: None)), \
+             patch("api.gateway_chat.get_session", return_value=session), \
+             patch("api.config.get_config", side_effect=RuntimeError("prelude boom")):
+            worker_thread.start()
+            worker_thread.join(timeout=5)
+            assert not worker_thread.is_alive()
+        waiter_thread.join(timeout=5)
+        assert not waiter_thread.is_alive()
+        assert observed["result"] == (True, None)
+        assert stream_id not in lifecycle
+        assert stream_id not in run_ids
+    finally:
+        if waiter_thread is not None:
+            waiter_thread.join(timeout=5)
+        worker_thread.join(timeout=5)
+        gateway_chat.STREAMS.pop(stream_id, None)
+        _reset_gateway_run_start_state(stream_id)
+
+
 def test_gateway_failed_start_result_survives_waiter_until_consumed():
     import time
 
