@@ -20659,17 +20659,23 @@ def _handle_memory_read(handler, parsed=None):
     except ImportError:
         home = Path.home() / ".hermes"
         mem_dir = home / "memories"
-    mem_file = mem_dir / "MEMORY.md"
-    user_file = mem_dir / "USER.md"
+
+    # Respect memory_enabled and user_profile_enabled config flags (#6406)
+    cfg = get_config()
+    memory_enabled = _webui_truthy(cfg.get("memory_enabled", True)) if isinstance(cfg, dict) else True
+    user_profile_enabled = _webui_truthy(cfg.get("user_profile_enabled", True)) if isinstance(cfg, dict) else True
+
+    mem_file = mem_dir / "MEMORY.md" if memory_enabled else None
+    user_file = mem_dir / "USER.md" if user_profile_enabled else None
     soul_file = home / "SOUL.md"
     memory = (
         mem_file.read_text(encoding="utf-8", errors="replace")
-        if mem_file.exists()
+        if mem_file and mem_file.exists()
         else ""
     )
     user = (
         user_file.read_text(encoding="utf-8", errors="replace")
-        if user_file.exists()
+        if user_file and user_file.exists()
         else ""
     )
     soul = (
@@ -20685,14 +20691,14 @@ def _handle_memory_read(handler, parsed=None):
             "user": _redact_text(user),
             "soul": _redact_text(soul),
             "project_context": _redact_text(project_context["content"]),
-            "memory_path": str(mem_file),
-            "user_path": str(user_file),
+            "memory_path": str(mem_file) if mem_file else "",
+            "user_path": str(user_file) if user_file else "",
             "soul_path": str(soul_file),
             "project_context_path": project_context["path"],
             "project_context_name": project_context.get("name", ""),
             "project_context_workspace": project_context["workspace"],
-            "memory_mtime": mem_file.stat().st_mtime if mem_file.exists() else None,
-            "user_mtime": user_file.stat().st_mtime if user_file.exists() else None,
+            "memory_mtime": mem_file.stat().st_mtime if mem_file and mem_file.exists() else None,
+            "user_mtime": user_file.stat().st_mtime if user_file and user_file.exists() else None,
             "soul_mtime": soul_file.stat().st_mtime if soul_file.exists() else None,
             "project_context_mtime": project_context["mtime"],
             "project_context_shadowed": project_context["shadowed"],
@@ -25754,6 +25760,19 @@ def _handle_memory_write(handler, body):
         require(body, "section", "content")
     except ValueError as e:
         return bad(handler, str(e))
+    section = body["section"]
+
+    # Respect memory_enabled and user_profile_enabled config flags (#6406)
+    cfg = get_config()
+    if section == "memory":
+        memory_enabled = _webui_truthy(cfg.get("memory_enabled", True)) if isinstance(cfg, dict) else True
+        if not memory_enabled:
+            return bad(handler, "Memory is disabled by configuration (memory_enabled: false)", 403)
+    elif section == "user":
+        user_profile_enabled = _webui_truthy(cfg.get("user_profile_enabled", True)) if isinstance(cfg, dict) else True
+        if not user_profile_enabled:
+            return bad(handler, "User profile is disabled by configuration (user_profile_enabled: false)", 403)
+
     try:
         from api.profiles import get_active_hermes_home
 
@@ -25763,7 +25782,6 @@ def _handle_memory_write(handler, body):
         home = Path.home() / ".hermes"
         mem_dir = home / "memories"
     mem_dir.mkdir(parents=True, exist_ok=True)
-    section = body["section"]
     if section == "memory":
         target = mem_dir / "MEMORY.md"
     elif section == "user":
