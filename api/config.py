@@ -3316,8 +3316,11 @@ def _candidate_supports_reasoning(candidate: str) -> bool:
             if major >= 4 or (major == 3 and minor >= 7):
                 return True
         return False
-    if "qwen" in token_set or normalized.startswith("qwen"):
+    if any(token.startswith("qwen") for token in tokens) or normalized.startswith("qwen"):
         # Restrict to Qwen 3+ (exclude Qwen 2/2.5)
+        # Use token-prefix matching (position-independent) so prefixed ids like
+        # "al-qwen3-8-max-preview" (tokens: ["al","qwen3","8",...]) still match,
+        # even though "qwen" is not a standalone token.
         match = re.search(r"qwen.*?(\d+)(?:\D+(\d+))?", normalized)
         if match:
             major = int(match.group(1))
