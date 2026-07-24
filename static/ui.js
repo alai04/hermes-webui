@@ -16582,9 +16582,10 @@ function renderMessages(options){
       if((isCompactWorklogMode()||isTransparentStream())&&_assistantThinkingBelongsInWorklog(m, rawIdx, toolCallAssistantIdxs)) assistantThinking.set(rawIdx, thinkingText);
       else if(window._showThinking!==false) seg.insertAdjacentHTML('beforeend', _thinkingCardHtml(thinkingText));
     }
-    const hasVisibleBody=!!(String(content||'').trim()||filesHtml||statusHtml||recoveryHtml);
+    const hasVisibleBody=!!(String(content||'').trim()||filesHtml||recoveryHtml);
     if(statusHtml){
       seg.insertAdjacentHTML('beforeend', statusHtml);
+      if(hasVisibleBody) seg.insertAdjacentHTML('beforeend', `${filesHtml}<div class="msg-body">${bodyHtml}</div>${footHtml}`);
     }else if(hasVisibleBody){
       seg.insertAdjacentHTML('beforeend', `${filesHtml}<div class="msg-body">${bodyHtml}</div>${footHtml}`);
     }else if(!(thinkingText&&window._showThinking!==false&&!isSimplifiedToolCalling())){
