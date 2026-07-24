@@ -463,3 +463,4 @@ def test_interim_assistant_to_tool_boundary_must_render_full_authoritative_punct
     assert data["toolSourceEventType"] == "tool"
     assert data["proseSourceText"] == data["authoritativeText"]
     assert data["proseRenderedText"] == data["authoritativeText"]
+    assert data["finalizeCount"] == 1
