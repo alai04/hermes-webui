@@ -161,7 +161,7 @@ function _restoreMessageScrollSnapshotSameFrameFallback(){{}}
 function requestAnimationFrame(callback){{callbacks.push(callback);}}
 const snapshot=_captureMessageScrollSnapshot();
 const capturedPinned=snapshot.pinned===true;
-{f"el._top=89577; _messageUserUnpinned=true; _scrollPinned=false;" if not move_to_bottom else ""}
+{"el._top=89577; _messageUserUnpinned=true; _scrollPinned=false;" if not move_to_bottom else ""}
 const scrollRebuildGuard=_prepareLiveAnchorScrollRebuildGuard(snapshot);
 _restoreMessageScrollSnapshotSameFrame(snapshot);
 const initialWrites=writes.slice();
