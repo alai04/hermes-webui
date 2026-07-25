@@ -3316,12 +3316,20 @@ def _candidate_supports_reasoning(candidate: str) -> bool:
             if major >= 4 or (major == 3 and minor >= 7):
                 return True
         return False
-    if any(token.startswith("qwen") for token in tokens):
-        # Restrict to Qwen 3+ (exclude Qwen 2/2.5)
-        # Token-prefix matching (position-independent) so prefixed ids like
-        # "al-qwen3-8-max-preview" (tokens: ["al","qwen3","8",...]) still match,
-        # even though "qwen" is not a standalone token. The bare
-        # normalized.startswith("qwen") case is subsumed by this check.
+    # Positive-only prefixed Qwen 3+ detection (e.g. "al-qwen3-8-max-preview"
+    # → tokens ["al","qwen3","8",...]). Scan for any token starting with
+    # "qwen" followed by version >= 3 and immediately allow. Do NOT return
+    # False here — Qwen 2.x embedded in hybrid IDs like
+    # "deepseek-r1-distill-qwen2.5-bakeneko-32b" must fall through to the
+    # DeepSeek detector below.
+    for token in tokens:
+        m = re.match(r"qwen(\d+)", token)
+        if m and int(m.group(1)) >= 3:
+            return True
+    # Terminal guard for standalone/bare Qwen IDs (original behavior):
+    # "qwen" as a standalone token or normalized starting with "qwen" means
+    # this IS a Qwen model — apply the 3+ gate and block 2.x.
+    if "qwen" in token_set or normalized.startswith("qwen"):
         match = re.search(r"qwen.*?(\d+)(?:\D+(\d+))?", normalized)
         if match:
             major = int(match.group(1))

@@ -550,4 +550,14 @@ def test_qwen_prefixed_alias_reasoning_detection():
         assert cfg._candidate_supports_reasoning(model) is False, (
             f"{model} must NOT be reasoning-capable (Qwen 2.x excluded)"
         )
+    # Hybrid IDs with embedded Qwen 2.x must NOT be shadowed by the Qwen
+    # branch — they must fall through to the DeepSeek detector.
+    for model in (
+        "deepseek-r1-distill-qwen2.5-bakeneko-32b",
+        "rinna/deepseek-r1-distill-qwen2.5-bakeneko-32b",
+    ):
+        assert cfg._candidate_supports_reasoning(model) is True, (
+            f"{model} must remain reasoning-capable (DeepSeek-R1 hybrid, "
+            f"Qwen 2.x must not shadow the DeepSeek detector)"
+        )
 
