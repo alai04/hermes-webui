@@ -15002,17 +15002,34 @@ function _captureMessageScrollSnapshot(){
   };
 }
 function _messageScrollSnapshotInputChanged(snapshot){
-  if(!snapshot||snapshot.pinned===true) return false;
+  if(!snapshot) return false;
   const captured=Number(snapshot.inputGeneration);
   const current=typeof _messageScrollInputGeneration==='number' ? _messageScrollInputGeneration : captured;
   return Number.isFinite(captured)&&Number.isFinite(current)&&current!==captured;
 }
 function _abandonMessageScrollSnapshot(){
-  _lastScrollTop=$('messages')?.scrollTop||0;
-  _lastMessageClientHeight=$('messages')?.clientHeight||0;
-  _messageUserUnpinned=true;
-  _scrollPinned=false;
-  _nearBottomCount=0;
+  const el=$('messages');
+  if(!el){
+    _messageUserUnpinned=true;
+    _scrollPinned=false;
+    _nearBottomCount=0;
+    return;
+  }
+  _lastScrollTop=el.scrollTop||0;
+  _lastMessageClientHeight=el.clientHeight||0;
+  // A generation mismatch abandons only the stale snapshot write. Reconcile
+  // ownership from the live viewport so a reader who moved down to the true
+  // bottom is immediately re-pinned instead of being stranded sticky-unpinned.
+  const bottomDistance=el.scrollHeight-el.scrollTop-el.clientHeight;
+  if(bottomDistance<=80){
+    _messageUserUnpinned=false;
+    _scrollPinned=true;
+    _nearBottomCount=2;
+  }else{
+    _messageUserUnpinned=true;
+    _scrollPinned=false;
+    _nearBottomCount=0;
+  }
 }
 function _restorePinnedMessageScrollSnapshot(snapshot){
   const el=$('messages');
@@ -15040,11 +15057,11 @@ function _restoreMessageScrollSnapshot(snapshot){
   // activity rebuilds can remount an older top-of-viewport anchor and yank a
   // pinned streaming transcript upward. Semantic anchors remain for manual
   // unpinned reading positions below.
-  if(_restorePinnedMessageScrollSnapshot(snapshot)) return;
   if(typeof _messageScrollSnapshotInputChanged==='function'&&_messageScrollSnapshotInputChanged(snapshot)){
     if(typeof _abandonMessageScrollSnapshot==='function') _abandonMessageScrollSnapshot();
     return;
   }
+  if(_restorePinnedMessageScrollSnapshot(snapshot)) return;
   let restoredViaAnchor=(snapshot.anchor&&typeof _restoreMessageViewportAnchor==='function')
     ? _restoreMessageViewportAnchor(snapshot.anchor,0)
     : false;
@@ -15262,14 +15279,14 @@ function _restoreMessageScrollSnapshotSameFrame(snapshot){
   // Same-frame live DOM updates (tool/worklog/activity rows) are the hot path for
   // streaming. Pinned followers must stay tail-relative here too; restoring the
   // semantic viewport anchor is only safe for explicitly unpinned readers.
-  if(_restorePinnedMessageScrollSnapshot(snapshot)) return;
-  // A delayed rAF restore must not overwrite a position the reader changed
-  // after capture. Recent-intent timestamps are lossy; the generation is
-  // monotonic and therefore preserves snapshot ownership exactly.
   if(typeof _messageScrollSnapshotInputChanged==='function'&&_messageScrollSnapshotInputChanged(snapshot)){
     if(typeof _abandonMessageScrollSnapshot==='function') _abandonMessageScrollSnapshot();
     return;
   }
+  if(_restorePinnedMessageScrollSnapshot(snapshot)) return;
+  // A delayed rAF restore must not overwrite a position the reader changed
+  // after capture. Recent-intent timestamps are lossy; the generation is
+  // monotonic and therefore preserves snapshot ownership exactly.
   let restoredViaAnchor=(snapshot.anchor&&typeof _restoreMessageViewportAnchor==='function')
     ? _restoreMessageViewportAnchor(snapshot.anchor,0)
     : false;

@@ -176,9 +176,11 @@ def _fallback_harness(*, snapshot_scroll_height, cur_scroll_height, snapshot_top
                       active_intent: bool = False, touch_like: bool = True,
                       init_scroll_top: int = 90030,
                       snapshot_user_unpinned: bool = False,
+                      snapshot_pinned: bool = False,
                       anchor=None, anchor_row_content_pos=None, container_top: int = 0,
                       top_pad_now=None, input_generation: int = 0,
-                      delayed_input_generation=None) -> str:
+                      delayed_input_generation=None, delayed_scroll_top: int = 89000,
+                      restore_fn: str = "_restoreMessageScrollSnapshotSameFrame") -> str:
     """Node harness for the absolute-fallback path of _restoreMessageScrollSnapshotSameFrame.
 
     SCROLL-DEPENDENT geometry (round-3 gate-cert requirement): the anchor row's
@@ -233,7 +235,12 @@ function _recentMessageScrollIntent(){{ return {intent_js}; }}
 function _recentMessageTouchScrollIntent(){{ return {intent_js}; }}
 function _isTouchLikeMessageViewport(){{ return {touch_js}; }}
 // realign path fails (no anchor restore) so execution reaches the absolute fallback
-function _restorePinnedMessageScrollSnapshot(){{ return false; }}
+function _restorePinnedMessageScrollSnapshot(snapshot){{
+  if(snapshot.pinned!==true) return false;
+  const pinnedTarget=el.scrollHeight-el.clientHeight-(Number(snapshot.bottom)||0);
+  el.scrollTop=pinnedTarget;
+  return true;
+}}
 function _restoreMessageViewportAnchor(){{ return false; }}
 function _remountMessageViewportAnchor(){{ return false; }}
 let _messageUserUnpinned = false; let _scrollPinned = true; let _nearBottomCount = 5;
@@ -244,13 +251,13 @@ function _deferClearProgrammaticScroll(){{}}
 function requestAnimationFrame(cb){{ cb(); }}
 function setTimeout(cb){{ cb(); return 1; }}
 const snapshot = {{ anchor: {anchor_js}, top: {snapshot_top}, bottom: 40,
-  scrollHeight: {sh}, inputGeneration: {input_generation}, pinned: false, userUnpinned: {str(snapshot_user_unpinned).lower()} }};
+  scrollHeight: {sh}, inputGeneration: {input_generation}, pinned: {str(snapshot_pinned).lower()}, userUnpinned: {str(snapshot_user_unpinned).lower()} }};
 eval(extractFunc('_desktopAnchorRealignDelta'));
 eval(extractFunc('_messageScrollSnapshotInputChanged'));
 eval(extractFunc('_abandonMessageScrollSnapshot'));
-eval(extractFunc('_restoreMessageScrollSnapshotSameFrame'));
-_restoreMessageScrollSnapshotSameFrame(snapshot);
-{f"stTop = 89000; _messageScrollInputGeneration = {delayed_input_generation}; _restoreMessageScrollSnapshotSameFrame(snapshot);" if delayed_input_generation is not None else ""}
+eval(extractFunc({json.dumps(restore_fn)}));
+{restore_fn}(snapshot);
+{f"stTop = {delayed_scroll_top}; _messageScrollInputGeneration = {delayed_input_generation}; {restore_fn}(snapshot);" if delayed_input_generation is not None else ""}
 console.log(JSON.stringify({{ wrote: writes.length, writes,
   messageUserUnpinned: _messageUserUnpinned, scrollPinned: _scrollPinned, finalScrollTop: Math.round(stTop) }}));
 """
@@ -345,6 +352,46 @@ def test_delayed_restore_cannot_overwrite_new_desktop_input():
     assert m["writes"] == [89577]
     assert m["finalScrollTop"] == 89000
     assert m["messageUserUnpinned"] is True and m["scrollPinned"] is False
+
+
+@pytest.mark.parametrize("restore_fn", [
+    "_restoreMessageScrollSnapshot",
+    "_restoreMessageScrollSnapshotSameFrame",
+])
+def test_delayed_pinned_restore_cannot_overwrite_new_upward_input(restore_fn):
+    """A pinned-at-capture snapshot must lose ownership before its tail write.
+
+    The reader moves upward before the delayed restore; the stale pinned snapshot
+    must not put them back at its captured tail-relative position.
+    """
+    m = json.loads(_run_node(_fallback_harness(
+        snapshot_scroll_height=90453, cur_scroll_height=90453, snapshot_top=89577,
+        active_intent=False, touch_like=False, snapshot_pinned=True,
+        init_scroll_top=89577, input_generation=0, delayed_input_generation=1,
+        delayed_scroll_top=89000,
+        restore_fn=restore_fn,
+    )))
+    assert m["writes"] == [89986]
+    assert m["finalScrollTop"] == 89000
+    assert m["messageUserUnpinned"] is True and m["scrollPinned"] is False
+
+
+@pytest.mark.parametrize("restore_fn", [
+    "_restoreMessageScrollSnapshot",
+    "_restoreMessageScrollSnapshotSameFrame",
+])
+def test_delayed_unpinned_restore_repins_reader_who_reached_bottom(restore_fn):
+    """Abandoning a stale unpinned snapshot must reconcile a live bottom position."""
+    m = json.loads(_run_node(_fallback_harness(
+        snapshot_scroll_height=90453, cur_scroll_height=90453, snapshot_top=89577,
+        active_intent=False, touch_like=False, snapshot_user_unpinned=True,
+        init_scroll_top=89577, input_generation=0, delayed_input_generation=1,
+        delayed_scroll_top=90026,
+        restore_fn=restore_fn,
+    )))
+    assert m["writes"] == [89577]
+    assert m["finalScrollTop"] == 90026
+    assert m["messageUserUnpinned"] is False and m["scrollPinned"] is True
 
 
 # ---- round-3 desktop anchor-realign (PR #5742): app's own scrollTop += delta idiom -----
