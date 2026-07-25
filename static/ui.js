@@ -5768,7 +5768,7 @@ function _recordNonMessageScrollIntent(e){
   if(!el||!target) return;
   if(!el.contains(target)){ _lastNonMessageScrollIntentMs=performance.now(); return; }
   if(e.type==='touchmove'||(typeof e.deltaY==='number'&&e.deltaY!==0)){
-    _messageScrollInputGeneration++;
+    if(typeof _messageScrollInputGeneration==='number') _messageScrollInputGeneration++;
   }
   // #4970: record ANY upward message-pane wheel motion as recent wheel intent,
   // including gentle low-delta trackpad wheels (e.g. deltaY:-5) that never reach
@@ -5975,7 +5975,7 @@ if(typeof window!=='undefined'){
   el.addEventListener('pointerdown',(e)=>{
     if(e.target===el&&e.offsetX>=el.clientWidth){
       _scrollbarDragActive=true;
-      _messageScrollInputGeneration++;
+      if(typeof _messageScrollInputGeneration==='number') _messageScrollInputGeneration++;
     }
   },{passive:true});
   window.addEventListener('pointerup',()=>{
@@ -6022,7 +6022,7 @@ if(typeof window!=='undefined'){
     // contains the focus, or the pointer is over it (keyboard scroll w/o focus).
     if(a===el||el.contains(a)||el.matches(':hover')){
       const now=performance.now();
-      _messageScrollInputGeneration++;
+      if(typeof _messageScrollInputGeneration==='number') _messageScrollInputGeneration++;
       _lastMessageKeyScrollIntentMs=now;
       const bottomDistance=el.scrollHeight-el.scrollTop-el.clientHeight;
       if(bottomDistance>120) _lastMessageScrollIntentMs=now;
@@ -15041,8 +15041,8 @@ function _restoreMessageScrollSnapshot(snapshot){
   // pinned streaming transcript upward. Semantic anchors remain for manual
   // unpinned reading positions below.
   if(_restorePinnedMessageScrollSnapshot(snapshot)) return;
-  if(_messageScrollSnapshotInputChanged(snapshot)){
-    _abandonMessageScrollSnapshot();
+  if(typeof _messageScrollSnapshotInputChanged==='function'&&_messageScrollSnapshotInputChanged(snapshot)){
+    if(typeof _abandonMessageScrollSnapshot==='function') _abandonMessageScrollSnapshot();
     return;
   }
   let restoredViaAnchor=(snapshot.anchor&&typeof _restoreMessageViewportAnchor==='function')
@@ -15266,8 +15266,8 @@ function _restoreMessageScrollSnapshotSameFrame(snapshot){
   // A delayed rAF restore must not overwrite a position the reader changed
   // after capture. Recent-intent timestamps are lossy; the generation is
   // monotonic and therefore preserves snapshot ownership exactly.
-  if(_messageScrollSnapshotInputChanged(snapshot)){
-    _abandonMessageScrollSnapshot();
+  if(typeof _messageScrollSnapshotInputChanged==='function'&&_messageScrollSnapshotInputChanged(snapshot)){
+    if(typeof _abandonMessageScrollSnapshot==='function') _abandonMessageScrollSnapshot();
     return;
   }
   let restoredViaAnchor=(snapshot.anchor&&typeof _restoreMessageViewportAnchor==='function')
