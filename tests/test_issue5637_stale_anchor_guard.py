@@ -119,6 +119,7 @@ def _live_render_ownership_harness(*, move_to_bottom: bool) -> str:
         "_abandonMessageScrollSnapshot",
         "_restorePinnedMessageScrollSnapshot",
         "_restoreMessageScrollSnapshotSameFrame",
+        "_prepareLiveAnchorScrollRebuildGuard",
         "_restoreLiveAnchorScrollSnapshotAfterRebuild",
     ]
     production = "\n".join(_extract_js_function(js, name) for name in functions)
@@ -144,7 +145,8 @@ const el={{
   querySelector(){{return null;}},
 }};
 const document={{getElementById(id){{return id==='messages'?el:null;}}}};
-function $(id){{return id==='messages'?el:null;}}
+const msgInner={{style:{{}},dataset:{{}}}};
+function $(id){{return id==='messages'?el:id==='msgInner'?msgInner:null;}}
 function _captureMessageViewportAnchor(){{return null;}}
 function _shouldFollowMessagesOnDomReplace(){{return true;}}
 function _deferClearProgrammaticScroll(){{}}
@@ -158,16 +160,19 @@ function _recentMessageTouchScrollIntent(){{return false;}}
 function _restoreMessageScrollSnapshotSameFrameFallback(){{}}
 function requestAnimationFrame(callback){{callbacks.push(callback);}}
 const snapshot=_captureMessageScrollSnapshot();
+const capturedPinned=snapshot.pinned===true;
+{f"el._top=89577; _messageUserUnpinned=true; _scrollPinned=false;" if not move_to_bottom else ""}
+const scrollRebuildGuard=_prepareLiveAnchorScrollRebuildGuard(snapshot);
 _restoreMessageScrollSnapshotSameFrame(snapshot);
 const initialWrites=writes.slice();
 writes=[];
+_restoreLiveAnchorScrollSnapshotAfterRebuild(snapshot,scrollRebuildGuard);
 recordWrites=false;
 _recordNonMessageScrollIntent({{target:el,deltaY:{target_delta}}});
 el.scrollTop={final_top};
 recordWrites=true;
-_restoreLiveAnchorScrollSnapshotAfterRebuild(snapshot,{{release(){{}}}});
 callbacks.shift()();
-console.log(JSON.stringify({{initialWrites,writes, finalScrollTop:el.scrollTop,
+console.log(JSON.stringify({{capturedPinned,guardQueued:!!(scrollRebuildGuard&&scrollRebuildGuard.release),initialWrites,writes, finalScrollTop:el.scrollTop,
   messageUserUnpinned:_messageUserUnpinned, scrollPinned:_scrollPinned,
   generation:_messageScrollInputGeneration}}));
 """
@@ -177,6 +182,8 @@ def test_live_render_queue_preserves_real_upward_input_from_pinned_capture():
     """The real producer and queued live-render callback preserve upward input."""
     result = json.loads(_run_node(_live_render_ownership_harness(move_to_bottom=False)))
     assert result == {
+        "capturedPinned": True,
+        "guardQueued": True,
         "initialWrites": [90026],
         "writes": [],
         "finalScrollTop": 89000,
@@ -190,6 +197,8 @@ def test_live_render_queue_repins_real_downward_input_at_bottom():
     """The real producer and queued live-render callback re-pin at true bottom."""
     result = json.loads(_run_node(_live_render_ownership_harness(move_to_bottom=True)))
     assert result == {
+        "capturedPinned": False,
+        "guardQueued": True,
         "initialWrites": [89577],
         "writes": [],
         "finalScrollTop": 90026,
@@ -326,7 +335,8 @@ def _fallback_harness(*, snapshot_scroll_height, cur_scroll_height, snapshot_top
                       snapshot_pinned: bool = False,
                       anchor=None, anchor_row_content_pos=None, container_top: int = 0,
                       top_pad_now=None, input_generation: int = 0,
-                      delayed_input_generation=None, delayed_scroll_top: int = 89000) -> str:
+                      delayed_input_generation=None, delayed_scroll_top: int = 89000,
+                      restore_fn: str = "_restoreMessageScrollSnapshotSameFrame") -> str:
     """Node harness for the absolute-fallback path of _restoreMessageScrollSnapshotSameFrame.
 
     SCROLL-DEPENDENT geometry (round-3 gate-cert requirement): the anchor row's
@@ -401,9 +411,9 @@ const snapshot = {{ anchor: {anchor_js}, top: {snapshot_top}, bottom: 40,
 eval(extractFunc('_desktopAnchorRealignDelta'));
 eval(extractFunc('_messageScrollSnapshotInputChanged'));
 eval(extractFunc('_abandonMessageScrollSnapshot'));
-eval(extractFunc('_restoreMessageScrollSnapshotSameFrame'));
-_restoreMessageScrollSnapshotSameFrame(snapshot);
-{f"stTop = {delayed_scroll_top}; _messageScrollInputGeneration = {delayed_input_generation}; _restoreMessageScrollSnapshotSameFrame(snapshot);" if delayed_input_generation is not None else ""}
+eval(extractFunc({json.dumps(restore_fn)}));
+{restore_fn}(snapshot);
+{f"stTop = {delayed_scroll_top}; _messageScrollInputGeneration = {delayed_input_generation}; {restore_fn}(snapshot);" if delayed_input_generation is not None else ""}
 console.log(JSON.stringify({{ wrote: writes.length, writes,
   messageUserUnpinned: _messageUserUnpinned, scrollPinned: _scrollPinned, finalScrollTop: Math.round(stTop) }}));
 """
@@ -500,7 +510,11 @@ def test_delayed_restore_cannot_overwrite_new_desktop_input():
     assert m["messageUserUnpinned"] is True and m["scrollPinned"] is False
 
 
-def test_delayed_pinned_restore_cannot_overwrite_new_upward_input():
+@pytest.mark.parametrize("restore_fn", [
+    "_restoreMessageScrollSnapshot",
+    "_restoreMessageScrollSnapshotSameFrame",
+])
+def test_delayed_pinned_restore_cannot_overwrite_new_upward_input(restore_fn):
     """A pinned-at-capture snapshot must lose ownership before its tail write.
 
     The reader moves upward before the delayed restore; the stale pinned snapshot
@@ -511,19 +525,25 @@ def test_delayed_pinned_restore_cannot_overwrite_new_upward_input():
         active_intent=False, touch_like=False, snapshot_pinned=True,
         init_scroll_top=89577, input_generation=0, delayed_input_generation=1,
         delayed_scroll_top=89000,
+        restore_fn=restore_fn,
     )))
     assert m["writes"] == [89986]
     assert m["finalScrollTop"] == 89000
     assert m["messageUserUnpinned"] is True and m["scrollPinned"] is False
 
 
-def test_delayed_unpinned_restore_repins_reader_who_reached_bottom():
+@pytest.mark.parametrize("restore_fn", [
+    "_restoreMessageScrollSnapshot",
+    "_restoreMessageScrollSnapshotSameFrame",
+])
+def test_delayed_unpinned_restore_repins_reader_who_reached_bottom(restore_fn):
     """Abandoning a stale unpinned snapshot must reconcile a live bottom position."""
     m = json.loads(_run_node(_fallback_harness(
         snapshot_scroll_height=90453, cur_scroll_height=90453, snapshot_top=89577,
         active_intent=False, touch_like=False, snapshot_user_unpinned=True,
         init_scroll_top=89577, input_generation=0, delayed_input_generation=1,
         delayed_scroll_top=90026,
+        restore_fn=restore_fn,
     )))
     assert m["writes"] == [89577]
     assert m["finalScrollTop"] == 90026
