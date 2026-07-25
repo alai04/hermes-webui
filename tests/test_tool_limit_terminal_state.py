@@ -19,6 +19,7 @@ def _run_streaming_with_fake_agent(
     *,
     prior_messages=None,
     prior_context_messages=None,
+    msg_text="Do the long task.",
 ):
     session_dir = tmp_path / "sessions"
     session_dir.mkdir()
@@ -49,7 +50,7 @@ def _run_streaming_with_fake_agent(
         context_messages=list(prior_context_messages or []),
     )
     session.active_stream_id = stream_id
-    session.pending_user_message = "Do the long task."
+    session.pending_user_message = msg_text
     session.pending_started_at = 1.0
     session.save()
     models.SESSIONS[session_id] = session
@@ -89,7 +90,7 @@ def _run_streaming_with_fake_agent(
         m.setitem(sys.modules, "hermes_state", fake_hermes_state)
         streaming._run_agent_streaming(
             session_id=session_id,
-            msg_text="Do the long task.",
+            msg_text=msg_text,
             model="gpt-4o",
             workspace=str(tmp_path),
             stream_id=stream_id,
@@ -253,6 +254,124 @@ def test_streaming_tool_limit_with_final_answer_persists_clean_done_state(tmp_pa
     assert assistant["role"] == "assistant"
     assert assistant["_terminal_state"] == "tool_limit_reached"
     assert assistant["_statusCard"]["title"] == "Tool iteration limit reached"
+
+
+def test_verification_followup_absent_from_messages_and_context_messages(tmp_path, monkeypatch):
+    phantom = (
+        "Verification already ran and passed - 12/12 tests green in the output "
+        "above. The system prompt is re-firing the stale check but the evidence "
+        "is fresh from this turn. Nothing else to run."
+    )
+    marker = "_verification_stop_synthetic"
+    prior_turn = [
+        {"role": "user", "content": "Fix the failing test."},
+        {"role": "assistant", "content": [{"type": "tool_use", "name": "terminal"}]},
+        {
+            "role": "tool",
+            "tool_call_id": "terminal",
+            "content": "Tests passed.",
+            "verification_evidence": {
+                "status": "passed",
+                "kind": "terminal",
+                "scope": "workspace",
+                "canonical_command": "pytest tests/test_app.py -q",
+            },
+        },
+        {"role": "assistant", "content": "The failing test is fixed."},
+    ]
+    result = {
+        "messages": prior_turn + [
+            {"role": "assistant", "content": "premature done", marker: True},
+            {"role": "user", "content": "[System: verify the workspace]", marker: True},
+            {"role": "assistant", "content": phantom},
+        ],
+    }
+
+    _events, payload = _run_streaming_with_fake_agent(
+        tmp_path,
+        monkeypatch,
+        result,
+        prior_messages=prior_turn,
+        prior_context_messages=prior_turn,
+    )
+
+    for field in ("messages", "context_messages"):
+        serialized = json.dumps(payload[field])
+        assert phantom not in serialized
+        assert marker not in serialized
+        assert "The failing test is fixed." in serialized
+
+
+def test_delta_followup_without_current_user_row_persists_first_legitimate_completion(tmp_path, monkeypatch):
+    result = {
+        "messages": [
+            {"role": "assistant", "content": "premature done", "_verification_stop_synthetic": True},
+            {"role": "user", "content": "[System: verify the workspace]", "_verification_stop_synthetic": True},
+            {"role": "assistant", "content": "Verified and fixed."},
+        ],
+    }
+    prior_turn = [
+        {"role": "user", "content": "Earlier request."},
+        {"role": "assistant", "content": "Earlier answer."},
+    ]
+
+    _events, payload = _run_streaming_with_fake_agent(
+        tmp_path,
+        monkeypatch,
+        result,
+        prior_messages=prior_turn,
+        prior_context_messages=prior_turn,
+    )
+
+    for field in ("messages", "context_messages"):
+        serialized = json.dumps(payload[field])
+        assert "Earlier answer." in serialized
+        assert "Verified and fixed." in serialized
+
+
+def test_context_writeback_uses_previous_display_answer_seed_when_context_lags(tmp_path, monkeypatch):
+    phantom = (
+        "Verification already ran and passed - 12/12 tests green in the output "
+        "above. The system prompt is re-firing the stale check but the evidence "
+        "is fresh from this turn. Nothing else to run."
+    )
+    marker = "_verification_stop_synthetic"
+    prior_messages = [
+        {"role": "user", "content": "Fix the failing test."},
+        {"role": "assistant", "content": [{"type": "tool_use", "name": "terminal"}]},
+        {
+            "role": "tool",
+            "tool_call_id": "terminal",
+            "content": "Tests passed.",
+            "verification_evidence": {
+                "status": "passed",
+                "kind": "terminal",
+                "scope": "workspace",
+                "canonical_command": "pytest tests/test_app.py -q",
+            },
+        },
+        {"role": "assistant", "content": "The failing test is fixed."},
+    ]
+    prior_context_messages = prior_messages[:-1]
+    result = {
+        "messages": [
+            {"role": "assistant", "content": "premature done", marker: True},
+            {"role": "user", "content": "[System: verify the workspace]", marker: True},
+            {"role": "assistant", "content": phantom},
+        ],
+    }
+
+    _events, payload = _run_streaming_with_fake_agent(
+        tmp_path,
+        monkeypatch,
+        result,
+        prior_messages=prior_messages,
+        prior_context_messages=prior_context_messages,
+        msg_text="Fix the failing test.",
+    )
+
+    assert phantom not in json.dumps(payload["messages"])
+    assert phantom not in json.dumps(payload["context_messages"])
 
 
 def test_streaming_tool_limit_partial_without_final_answer_emits_no_final_apperror(tmp_path, monkeypatch):

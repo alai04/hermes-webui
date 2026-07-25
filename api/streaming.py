@@ -1416,17 +1416,59 @@ def _is_synthetic_control_message(message) -> bool:
     )
 
 
-def _drop_synthetic_control_messages(messages):
+def _drop_synthetic_control_messages(messages, *, current_turn_has_visible_answer=False):
     """Remove Agent-internal synthetic scaffolding turns from the WebUI transcript.
 
     Honors the structured ``_verification_stop_synthetic`` / ``_pre_verify_synthetic``
     markers the agent already sets, rather than string-matching the nudge copy.
     """
-    return [
-        msg
-        for msg in list(messages or [])
-        if not _is_synthetic_control_message(msg)
-    ]
+    cleaned = []
+    saw_verification_nudge = False
+    saw_settled_answer_before_nudge = bool(current_turn_has_visible_answer)
+    for msg in list(messages or []):
+        is_synthetic = _is_synthetic_control_message(msg)
+        if is_synthetic:
+            if isinstance(msg, dict) and msg.get('role') == 'user':
+                saw_verification_nudge = True
+            continue
+        if isinstance(msg, dict) and msg.get('role') == 'user':
+            saw_verification_nudge = False
+            saw_settled_answer_before_nudge = False
+        elif isinstance(msg, dict) and msg.get('role') == 'assistant':
+            settled = (
+                _assistant_message_has_final_visible_text(msg)
+                and not msg.get('_error')
+            )
+            if saw_verification_nudge and saw_settled_answer_before_nudge and settled:
+                continue
+            if settled:
+                saw_settled_answer_before_nudge = True
+        cleaned.append(msg)
+    return cleaned
+
+
+def _current_turn_has_visible_assistant_answer(messages, *, current_user_text=None):
+    """Return True when the latest real user turn already has visible assistant prose."""
+    if current_user_text is not None:
+        current_user_row = {'role': 'user', 'content': current_user_text}
+        current_user_tail = _stale_user_tail_candidate(current_user_row)
+        if current_user_tail:
+            last_real_user = None
+            for msg in reversed(list(messages or [])):
+                if isinstance(msg, dict) and not _is_synthetic_control_message(msg) and msg.get('role') == 'user':
+                    last_real_user = msg
+                    break
+            if _stale_user_tail_candidate(last_real_user) != current_user_tail:
+                return False
+    for msg in reversed(list(messages or [])):
+        if not isinstance(msg, dict) or _is_synthetic_control_message(msg):
+            continue
+        role = msg.get('role')
+        if role == 'assistant' and _assistant_message_has_final_visible_text(msg) and not msg.get('_error'):
+            return True
+        if role == 'user':
+            return False
+    return False
 
 
 def _agent_result_tool_limit_reached(result) -> bool:
@@ -5174,6 +5216,19 @@ def _dedupe_replayed_context_messages(previous_context, result_messages, msg_tex
                 if candidates:
                     candidates = _strip_replayed_context_items(previous_context, candidates)
                 return previous_context + candidates
+        assistant_or_tool_only_result = bool(result_messages) and all(
+            _is_context_compression_marker(m)
+            or (
+                isinstance(m, dict)
+                and m.get('role') in ('assistant', 'tool')
+            )
+            for m in result_messages
+        )
+        if assistant_or_tool_only_result:
+            candidates = _strip_replayed_prefix(previous_context, result_messages)
+            if candidates:
+                candidates = _strip_replayed_context_items(previous_context, candidates)
+            return previous_context + candidates
         return result_messages
     candidates = result_messages[len(previous_context):]
     # Strip stale merges only from the new-turn candidate slice so that
@@ -5734,7 +5789,14 @@ def _merge_display_messages_after_agent_result(previous_display, previous_contex
     # answer/nudge live in the agent's returned messages and prior context, and
     # would otherwise slip into the merged transcript as a real delta. (#5334)
     previous_context = _drop_synthetic_control_messages(previous_context)
-    result_messages = _drop_synthetic_control_messages(result_messages)
+    _result_seed_visible_answer = (
+        _current_turn_has_visible_assistant_answer(previous_context, current_user_text=msg_text)
+        or _current_turn_has_visible_assistant_answer(previous_display, current_user_text=msg_text)
+    )
+    result_messages = _drop_synthetic_control_messages(
+        result_messages,
+        current_turn_has_visible_answer=_result_seed_visible_answer,
+    )
     if not result_messages:
         return previous_display
     previous_user_tail = _stale_user_tail_candidate(_last_user_row(previous_context))
@@ -5887,7 +5949,19 @@ def _merge_display_messages_after_agent_result(previous_display, previous_contex
             candidates = _strip_replayed_prefix(previous_context, candidates)
     else:
         current_user_idx = _find_current_user_turn(result_messages, msg_text)
-        turn_candidates = result_messages[current_user_idx:] if current_user_idx is not None else []
+        assistant_or_tool_only_result = bool(result_messages) and all(
+            _is_context_compression_marker(m)
+            or (
+                isinstance(m, dict)
+                and m.get('role') in ('assistant', 'tool')
+            )
+            for m in result_messages
+        )
+        turn_candidates = (
+            result_messages[current_user_idx:]
+            if current_user_idx is not None
+            else result_messages if assistant_or_tool_only_result else []
+        )
         # Normalize stale merges only in the current-turn slice.
         if msg_text and previous_user_tail:
             turn_candidates = _strip_stale_user_merge_from_messages(
@@ -9215,6 +9289,20 @@ def _run_agent_streaming(
                         )
                         if isinstance(result, dict):
                             result = {**result, 'messages': _result_messages}
+                    _result_messages = _drop_synthetic_control_messages(
+                        _result_messages,
+                        current_turn_has_visible_answer=
+                        (
+                            _current_turn_has_visible_assistant_answer(
+                                _previous_context_messages,
+                                current_user_text=msg_text,
+                            )
+                            or _current_turn_has_visible_assistant_answer(
+                                _previous_messages,
+                                current_user_text=msg_text,
+                            )
+                        ),
+                    )
                     if cancel_event.is_set():
                         _finalize_cancelled_turn(s, ephemeral=False)
                         try:
@@ -9575,6 +9663,20 @@ def _run_agent_streaming(
                                 _result_messages = _drop_synthetic_max_iteration_summary_requests(
                                     _result_messages,
                                     enabled=_agent_result_tool_limit_reached(result),
+                                )
+                                _result_messages = _drop_synthetic_control_messages(
+                                    _result_messages,
+                                    current_turn_has_visible_answer=
+                                    (
+                                        _current_turn_has_visible_assistant_answer(
+                                            _previous_context_messages,
+                                            current_user_text=msg_text,
+                                        )
+                                        or _current_turn_has_visible_assistant_answer(
+                                            _previous_messages,
+                                            current_user_text=msg_text,
+                                        )
+                                    ),
                                 )
                                 _next_context_messages = _restore_reasoning_metadata(
                                     _previous_context_messages,
@@ -10800,6 +10902,20 @@ def _run_agent_streaming(
                                     )
                                     return
                                 _result_messages = _heal_result.get('messages') or _previous_context_messages
+                                _result_messages = _drop_synthetic_control_messages(
+                                    _result_messages,
+                                    current_turn_has_visible_answer=
+                                    (
+                                        _current_turn_has_visible_assistant_answer(
+                                            _previous_context_messages,
+                                            current_user_text=msg_text,
+                                        )
+                                        or _current_turn_has_visible_assistant_answer(
+                                            _previous_messages,
+                                            current_user_text=msg_text,
+                                        )
+                                    ),
+                                )
                                 _next_context_messages = _restore_reasoning_metadata(
                                     _previous_context_messages, _result_messages,
                                 )
