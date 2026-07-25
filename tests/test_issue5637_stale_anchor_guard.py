@@ -135,6 +135,7 @@ let _lastScrollTop=null, _lastMessageClientHeight=null;
 let _programmaticScroll=false, _programmaticScrollSetAt=0;
 let recordWrites=true;
 const callbacks=[];
+let delayedSnapshotPinned=null;
 const performance={{now(){{return 1;}}}};
 const el={{
   scrollHeight:90453, clientHeight:427,
@@ -158,21 +159,21 @@ function _isTouchLikeMessageViewport(){{return false;}}
 function _recentMessageScrollIntent(){{return false;}}
 function _recentMessageTouchScrollIntent(){{return false;}}
 function _restoreMessageScrollSnapshotSameFrameFallback(){{}}
-function requestAnimationFrame(callback){{callbacks.push(callback);}}
+function requestAnimationFrame(callback){{callbacks.push(()=>{{delayedSnapshotPinned=snapshot.pinned===true; callback();}});}}
 const snapshot=_captureMessageScrollSnapshot();
 const capturedPinned=snapshot.pinned===true;
-{"el._top=89577; _messageUserUnpinned=true; _scrollPinned=false;" if not move_to_bottom else ""}
 const scrollRebuildGuard=_prepareLiveAnchorScrollRebuildGuard(snapshot);
 _restoreMessageScrollSnapshotSameFrame(snapshot);
 const initialWrites=writes.slice();
 writes=[];
 _restoreLiveAnchorScrollSnapshotAfterRebuild(snapshot,scrollRebuildGuard);
+const guardQueued=callbacks.length>0;
 recordWrites=false;
 _recordNonMessageScrollIntent({{target:el,deltaY:{target_delta}}});
 el.scrollTop={final_top};
 recordWrites=true;
 callbacks.shift()();
-console.log(JSON.stringify({{capturedPinned,guardQueued:!!(scrollRebuildGuard&&scrollRebuildGuard.release),initialWrites,writes, finalScrollTop:el.scrollTop,
+console.log(JSON.stringify({{capturedPinned,guardQueued,delayedSnapshotPinned,initialWrites,writes, finalScrollTop:el.scrollTop,
   messageUserUnpinned:_messageUserUnpinned, scrollPinned:_scrollPinned,
   generation:_messageScrollInputGeneration}}));
 """
@@ -184,6 +185,7 @@ def test_live_render_queue_preserves_real_upward_input_from_pinned_capture():
     assert result == {
         "capturedPinned": True,
         "guardQueued": True,
+        "delayedSnapshotPinned": True,
         "initialWrites": [90026],
         "writes": [],
         "finalScrollTop": 89000,
@@ -199,6 +201,7 @@ def test_live_render_queue_repins_real_downward_input_at_bottom():
     assert result == {
         "capturedPinned": False,
         "guardQueued": True,
+        "delayedSnapshotPinned": False,
         "initialWrites": [89577],
         "writes": [],
         "finalScrollTop": 90026,
