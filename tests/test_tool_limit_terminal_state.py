@@ -300,12 +300,21 @@ def test_verification_nudge_is_removed_while_corrective_followup_persists(
         msg_text="Fix the failing test.",
     )
 
+    expected_sequence = [
+        (message["role"], message.get("content"))
+        for message in prior_turn
+    ] + [("assistant", corrective)]
     for field in ("messages", "context_messages"):
         serialized = json.dumps(payload[field])
         assert marker not in serialized
         assert "[System: verify the workspace]" not in serialized
-        assert "The failing test is fixed." in serialized
-        assert corrective in serialized
+        assert [
+            (message["role"], message.get("content"))
+            for message in payload[field]
+        ] == expected_sequence
+        assert [message.get("content") for message in payload[field]].count(
+            "Fix the failing test."
+        ) == 1
 
 
 @pytest.mark.parametrize("marker", ["_verification_stop_synthetic", "_pre_verify_synthetic"])

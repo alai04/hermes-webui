@@ -1429,12 +1429,30 @@ def _drop_synthetic_control_messages(messages):
     ]
 
 
+def _clean_synthetic_control_messages_with_provenance(messages):
+    """Remove synthetic rows while retaining marked verification-nudge provenance."""
+    raw_messages = list(messages or [])
+    has_verification_nudge = any(
+        isinstance(message, dict)
+        and message.get('role') == 'user'
+        and _is_synthetic_control_message(message)
+        for message in raw_messages
+    )
+    return _drop_synthetic_control_messages(raw_messages), has_verification_nudge
+
+
 def _prepare_marker_clean_writeback(previous_context_messages, result_messages):
-    """Return the marker-cleaned result and the matching next context writeback."""
-    cleaned = _drop_synthetic_control_messages(result_messages)
+    """Return marker-cleaned rows, next context rows, and nudge provenance."""
+    cleaned, has_verification_nudge = _clean_synthetic_control_messages_with_provenance(
+        result_messages
+    )
     if cleaned or not result_messages:
-        return cleaned, _restore_reasoning_metadata(previous_context_messages, cleaned)
-    return [], list(previous_context_messages or [])
+        return (
+            cleaned,
+            _restore_reasoning_metadata(previous_context_messages, cleaned),
+            has_verification_nudge,
+        )
+    return [], list(previous_context_messages or []), has_verification_nudge
 
 
 def _current_turn_already_has_visible_assistant_answer(messages, *, current_user_text=None):
@@ -5726,7 +5744,14 @@ def _advance_truncation_watermark_after_commit(session) -> None:
     session.truncation_watermark = time.time()
 
 
-def _merge_display_messages_after_agent_result(previous_display, previous_context, result_messages, msg_text, source: str = "webui"):
+def _merge_display_messages_after_agent_result(
+    previous_display,
+    previous_context,
+    result_messages,
+    msg_text,
+    source: str = "webui",
+    verification_nudge_provenance: bool = False,
+):
     """Keep UI transcript durable while allowing model context to compact.
 
     If Hermes Agent returns a normal append-only history, append that delta to
@@ -5775,6 +5800,12 @@ def _merge_display_messages_after_agent_result(previous_display, previous_contex
     previous_display = _deduped
     previous_context = list(previous_context or [])
     result_messages = list(result_messages or [])
+    verification_nudge_provenance = verification_nudge_provenance or any(
+        isinstance(message, dict)
+        and message.get('role') == 'user'
+        and _is_synthetic_control_message(message)
+        for message in result_messages
+    )
     # Same marker filter for the model-history inputs: the synthetic verify-loop
     # answer/nudge live in the agent's returned messages and prior context, and
     # would otherwise slip into the merged transcript as a real delta. (#5334)
@@ -5969,10 +6000,19 @@ def _merge_display_messages_after_agent_result(previous_display, previous_contex
             or _looks_like_current_user_turn(merged[-1], msg_text)
         )
     )
+    verification_user_already_checkpointed = bool(
+        verification_nudge_provenance
+        and msg_text
+        and any(
+            _looks_like_current_user_turn(_last_user_row(history), msg_text)
+            for history in (previous_display, previous_context)
+        )
+    )
     if (
         current_user_key is not None
         and not current_user_in_candidates
         and not current_user_already_checkpointed
+        and not verification_user_already_checkpointed
         and any(
             isinstance(m, dict) and m.get('role') in ('assistant', 'tool')
             for m in candidates
@@ -9272,7 +9312,11 @@ def _run_agent_streaming(
                         )
                         if isinstance(result, dict):
                             result = {**result, 'messages': _result_messages}
-                    _result_messages, _next_context_messages = _prepare_marker_clean_writeback(
+                    (
+                        _result_messages,
+                        _next_context_messages,
+                        _verification_nudge_provenance,
+                    ) = _prepare_marker_clean_writeback(
                         _previous_context_messages,
                         _result_messages,
                     )
@@ -9315,6 +9359,7 @@ def _run_agent_streaming(
                         _restore_display_reasoning_metadata(_previous_messages, _result_messages),
                         msg_text,
                         source=getattr(s, 'pending_user_source', None) or 'webui',
+                        verification_nudge_provenance=_verification_nudge_provenance,
                     )
                     _compact_session_image_parts_for_persistence(s)
                     _advance_truncation_watermark_after_commit(s)  # #3831
@@ -9650,7 +9695,11 @@ def _run_agent_streaming(
                                     _result_messages,
                                     enabled=_agent_result_tool_limit_reached(result),
                                 )
-                                _result_messages, _next_context_messages = _prepare_marker_clean_writeback(
+                                (
+                                    _result_messages,
+                                    _next_context_messages,
+                                    _verification_nudge_provenance,
+                                ) = _prepare_marker_clean_writeback(
                                     _previous_context_messages,
                                     _result_messages,
                                 )
@@ -9673,6 +9722,7 @@ def _run_agent_streaming(
                                     _restore_reasoning_metadata(_previous_messages, _result_messages),
                                     msg_text,
                                     source=getattr(s, 'pending_user_source', None) or 'webui',
+                                    verification_nudge_provenance=_verification_nudge_provenance,
                                 )
                                 _compact_session_image_parts_for_persistence(s)
                                 _advance_truncation_watermark_after_commit(s)  # #3831
@@ -10875,7 +10925,11 @@ def _run_agent_streaming(
                                     )
                                     return
                                 _result_messages = _heal_result.get('messages') or _previous_context_messages
-                                _result_messages, _next_context_messages = _prepare_marker_clean_writeback(
+                                (
+                                    _result_messages,
+                                    _next_context_messages,
+                                    _verification_nudge_provenance,
+                                ) = _prepare_marker_clean_writeback(
                                     _previous_context_messages,
                                     _result_messages,
                                 )
@@ -10898,6 +10952,7 @@ def _run_agent_streaming(
                                     _restore_reasoning_metadata(_previous_messages, _result_messages),
                                     msg_text,
                                     source=getattr(s, 'pending_user_source', None) or 'webui',
+                                    verification_nudge_provenance=_verification_nudge_provenance,
                                 )
                                 _compact_session_image_parts_for_persistence(s)
                                 _advance_truncation_watermark_after_commit(s)  # #3831
