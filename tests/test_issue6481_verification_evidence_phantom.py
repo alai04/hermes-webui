@@ -1,13 +1,10 @@
-"""Regression coverage for issue #6481 verification follow-up contamination."""
+"""Regression coverage for issue #6481 verification follow-up contracts."""
 
 from api import streaming
 
 
-PHANTOM_PARAGRAPH = (
-    "Verification already ran and passed - 12/12 tests green in the output "
-    "above. The system prompt is re-firing the stale check but the evidence "
-    "is fresh from this turn. Nothing else to run."
-)
+ATTEMPTED_ANSWER = "The failing test is fixed."
+CORRECTIVE_ANSWER = "Verification failed. I fixed the parser and reran the tests."
 VERIFICATION_EVIDENCE = {
     "status": "passed",
     "kind": "terminal",
@@ -16,7 +13,7 @@ VERIFICATION_EVIDENCE = {
 }
 
 
-def _current_turn_prefix(*, include_natural_answer):
+def _current_turn_prefix(*, include_attempted_answer):
     messages = [
         {"role": "user", "content": "Fix the failing test."},
         {
@@ -30,16 +27,15 @@ def _current_turn_prefix(*, include_natural_answer):
             "verification_evidence": VERIFICATION_EVIDENCE,
         },
     ]
-    if include_natural_answer:
-        messages.append({"role": "assistant", "content": "The failing test is fixed."})
+    if include_attempted_answer:
+        messages.append({"role": "assistant", "content": ATTEMPTED_ANSWER})
     return messages
 
 
-def _verification_followup(marker, phantom=PHANTOM_PARAGRAPH):
+def _verification_followup(marker, corrective=CORRECTIVE_ANSWER):
     return [
-        {"role": "assistant", "content": "premature done", marker: True},
         {"role": "user", "content": "[System: verify the workspace]", marker: True},
-        {"role": "assistant", "content": phantom},
+        {"role": "assistant", "content": corrective},
     ]
 
 
@@ -50,67 +46,46 @@ def _merge(result_messages, previous=None, msg_text="Fix the failing test."):
     )
 
 
-def test_issue6481_phantom_followup_removed_after_natural_answer():
-    previous = _current_turn_prefix(include_natural_answer=True)
-    merged = _merge(
-        previous + _verification_followup("_verification_stop_synthetic"),
-        previous=previous,
-    )
-
-    contents = [message.get("content") for message in merged]
-    assert "The failing test is fixed." in contents
-    assert PHANTOM_PARAGRAPH not in contents
-    assert all(not streaming._is_synthetic_control_message(message) for message in merged)
-
-
-def test_verification_answer_survives_when_nudge_is_first_visible_answer():
+def test_corrective_followup_survives_after_attempted_answer_for_both_markers():
     for marker in ("_verification_stop_synthetic", "_pre_verify_synthetic"):
-        previous = _current_turn_prefix(include_natural_answer=False)
-        merged = _merge(previous + _verification_followup(marker), previous=previous)
+        previous = _current_turn_prefix(include_attempted_answer=True)
+        merged = _merge(
+            previous + _verification_followup(marker),
+            previous=previous,
+        )
 
-        assert PHANTOM_PARAGRAPH in [message.get("content") for message in merged]
+        contents = [message.get("content") for message in merged]
+        assert contents.count(ATTEMPTED_ANSWER) == 1
+        assert CORRECTIVE_ANSWER in contents
+        assert "[System: verify the workspace]" not in contents
         assert all(not streaming._is_synthetic_control_message(message) for message in merged)
 
 
-def test_pre_verify_redundant_followup_matches_verify_on_stop():
-    previous = _current_turn_prefix(include_natural_answer=True)
-    merged = _merge(
-        previous + _verification_followup("_pre_verify_synthetic"),
-        previous=previous,
-    )
+def test_delta_only_followup_preserves_corrective_answer():
+    for marker in ("_verification_stop_synthetic", "_pre_verify_synthetic"):
+        previous = _current_turn_prefix(include_attempted_answer=True)
+        merged = _merge(
+            _verification_followup(marker),
+            previous=previous,
+        )
 
-    contents = [message.get("content") for message in merged]
-    assert contents.count("The failing test is fixed.") == 1
-    assert PHANTOM_PARAGRAPH not in contents
-
-
-def test_error_row_before_nudge_does_not_block_first_legitimate_completion():
-    previous = _current_turn_prefix(include_natural_answer=False) + [
-        {"role": "assistant", "content": "**Runtime error:** pytest crashed", "_error": True}
-    ]
-    merged = _merge(
-        previous + _verification_followup("_verification_stop_synthetic", "Verified and fixed."),
-        previous=previous,
-    )
-
-    contents = [message.get("content") for message in merged]
-    assert "Verified and fixed." in contents
+        contents = [message.get("content") for message in merged]
+        assert ATTEMPTED_ANSWER in contents
+        assert CORRECTIVE_ANSWER in contents
+        assert "[System: verify the workspace]" not in contents
 
 
-def test_delta_followup_without_current_user_row_keeps_first_legitimate_completion():
-    previous = [
-        {"role": "user", "content": "Earlier request."},
-        {"role": "assistant", "content": "Earlier answer."},
-    ]
-    merged = _merge(
-        _verification_followup("_verification_stop_synthetic", "Verified and fixed."),
-        previous=previous,
-        msg_text="Run the verification follow-up.",
-    )
+def test_first_post_nudge_answer_survives_when_no_attempted_answer_exists():
+    for marker in ("_verification_stop_synthetic", "_pre_verify_synthetic"):
+        previous = _current_turn_prefix(include_attempted_answer=False)
+        merged = _merge(
+            previous + _verification_followup(marker),
+            previous=previous,
+        )
 
-    contents = [message.get("content") for message in merged]
-    assert "Earlier answer." in contents
-    assert "Verified and fixed." in contents
+        contents = [message.get("content") for message in merged]
+        assert CORRECTIVE_ANSWER in contents
+        assert "[System: verify the workspace]" not in contents
 
 
 def test_unmarked_adjacent_assistant_rows_remain_unchanged():

@@ -1416,39 +1416,29 @@ def _is_synthetic_control_message(message) -> bool:
     )
 
 
-def _drop_synthetic_control_messages(messages, *, current_turn_has_visible_answer=False):
+def _drop_synthetic_control_messages(messages):
     """Remove Agent-internal synthetic scaffolding turns from the WebUI transcript.
 
     Honors the structured ``_verification_stop_synthetic`` / ``_pre_verify_synthetic``
     markers the agent already sets, rather than string-matching the nudge copy.
     """
-    cleaned = []
-    saw_verification_nudge = False
-    saw_settled_answer_before_nudge = bool(current_turn_has_visible_answer)
-    for msg in list(messages or []):
-        is_synthetic = _is_synthetic_control_message(msg)
-        if is_synthetic:
-            if isinstance(msg, dict) and msg.get('role') == 'user':
-                saw_verification_nudge = True
-            continue
-        if isinstance(msg, dict) and msg.get('role') == 'user':
-            saw_verification_nudge = False
-            saw_settled_answer_before_nudge = False
-        elif isinstance(msg, dict) and msg.get('role') == 'assistant':
-            settled = (
-                _assistant_message_has_final_visible_text(msg)
-                and not msg.get('_error')
-            )
-            if saw_verification_nudge and saw_settled_answer_before_nudge and settled:
-                continue
-            if settled:
-                saw_settled_answer_before_nudge = True
-        cleaned.append(msg)
-    return cleaned
+    return [
+        msg
+        for msg in list(messages or [])
+        if not _is_synthetic_control_message(msg)
+    ]
 
 
-def _current_turn_has_visible_assistant_answer(messages, *, current_user_text=None):
-    """Return True when the latest real user turn already has visible assistant prose."""
+def _prepare_marker_clean_writeback(previous_context_messages, result_messages):
+    """Return the marker-cleaned result and the matching next context writeback."""
+    cleaned = _drop_synthetic_control_messages(result_messages)
+    if cleaned or not result_messages:
+        return cleaned, _restore_reasoning_metadata(previous_context_messages, cleaned)
+    return [], list(previous_context_messages or [])
+
+
+def _current_turn_already_has_visible_assistant_answer(messages, *, current_user_text=None):
+    """Return True when the current real user turn already has visible assistant prose."""
     if current_user_text is not None:
         current_user_row = {'role': 'user', 'content': current_user_text}
         current_user_tail = _stale_user_tail_candidate(current_user_row)
@@ -5789,14 +5779,7 @@ def _merge_display_messages_after_agent_result(previous_display, previous_contex
     # answer/nudge live in the agent's returned messages and prior context, and
     # would otherwise slip into the merged transcript as a real delta. (#5334)
     previous_context = _drop_synthetic_control_messages(previous_context)
-    _result_seed_visible_answer = (
-        _current_turn_has_visible_assistant_answer(previous_context, current_user_text=msg_text)
-        or _current_turn_has_visible_assistant_answer(previous_display, current_user_text=msg_text)
-    )
-    result_messages = _drop_synthetic_control_messages(
-        result_messages,
-        current_turn_has_visible_answer=_result_seed_visible_answer,
-    )
+    result_messages = _drop_synthetic_control_messages(result_messages)
     if not result_messages:
         return previous_display
     previous_user_tail = _stale_user_tail_candidate(_last_user_row(previous_context))
@@ -9289,19 +9272,9 @@ def _run_agent_streaming(
                         )
                         if isinstance(result, dict):
                             result = {**result, 'messages': _result_messages}
-                    _result_messages = _drop_synthetic_control_messages(
+                    _result_messages, _next_context_messages = _prepare_marker_clean_writeback(
+                        _previous_context_messages,
                         _result_messages,
-                        current_turn_has_visible_answer=
-                        (
-                            _current_turn_has_visible_assistant_answer(
-                                _previous_context_messages,
-                                current_user_text=msg_text,
-                            )
-                            or _current_turn_has_visible_assistant_answer(
-                                _previous_messages,
-                                current_user_text=msg_text,
-                            )
-                        ),
                     )
                     if cancel_event.is_set():
                         _finalize_cancelled_turn(s, ephemeral=False)
@@ -9319,25 +9292,22 @@ def _run_agent_streaming(
                             logger.debug("Failed to append cancelled turn journal event", exc_info=True)
                         put('cancel', _cancel_event_payload('Cancelled by user'))
                         return
-                    _next_context_messages = _restore_reasoning_metadata(
-                        _previous_context_messages,
-                        _result_messages,
-                    )
-                    # Stamp stable ids on the shared result rows AFTER the context
-                    # restore (so carried-forward ids survive) and BEFORE the
-                    # dedupe/merge build both arrays — including before
-                    # _dedupe_replayed_context_messages deep-copies any
-                    # stale-user repaired boundary row — so display and
-                    # model-context copies of each row share an id for the
-                    # fork/truncate aligner.
-                    _assign_stable_message_ids(
-                        _result_messages, _previous_messages, _previous_context_messages
-                    )
-                    _next_context_messages = _dedupe_replayed_context_messages(
-                        _previous_context_messages,
-                        _next_context_messages,
-                        msg_text,
-                    )
+                    if _result_messages:
+                        # Stamp stable ids on the shared result rows AFTER the context
+                        # restore (so carried-forward ids survive) and BEFORE the
+                        # dedupe/merge build both arrays — including before
+                        # _dedupe_replayed_context_messages deep-copies any
+                        # stale-user repaired boundary row — so display and
+                        # model-context copies of each row share an id for the
+                        # fork/truncate aligner.
+                        _assign_stable_message_ids(
+                            _result_messages, _previous_messages, _previous_context_messages
+                        )
+                        _next_context_messages = _dedupe_replayed_context_messages(
+                            _previous_context_messages,
+                            _next_context_messages,
+                            msg_text,
+                        )
                     s.context_messages = _deduplicate_context_messages(_next_context_messages)
                     s.messages = _merge_display_messages_after_agent_result(
                         _previous_messages,
@@ -9491,7 +9461,7 @@ def _run_agent_streaming(
                 # workspace-aware helper from this branch while still
                 # preserving the pre-turn length for downstream self-heal
                 # checks introduced on master.
-                _all_result_messages = result.get('messages') or []
+                _all_result_messages = _drop_synthetic_control_messages(result.get('messages') or [])
                 _prev_len = len(_previous_context_messages)
                 _assistant_added = _assistant_reply_added_after_current_turn(
                     _all_result_messages,
@@ -9528,6 +9498,22 @@ def _run_agent_streaming(
                     source=getattr(s, 'pending_user_source', None) or 'webui',
                     drop_replayed_assistant=_drop_replayed_assistant,
                 )
+                if (
+                    not _all_result_messages
+                    and (
+                        _current_turn_already_has_visible_assistant_answer(
+                            _previous_messages,
+                            current_user_text=msg_text,
+                        )
+                        or _current_turn_already_has_visible_assistant_answer(
+                            _previous_context_messages,
+                            current_user_text=msg_text,
+                        )
+                    )
+                ):
+                    _saved_transcript_lacks_final_answer = False
+                if not _assistant_added and not _saved_transcript_lacks_final_answer:
+                    _assistant_added = True
                 _is_agent_result_terminal = _agent_result_terminal_failure(result)
                 _terminal_failure = (
                     _captured_terminal_failure
@@ -9664,35 +9650,22 @@ def _run_agent_streaming(
                                     _result_messages,
                                     enabled=_agent_result_tool_limit_reached(result),
                                 )
-                                _result_messages = _drop_synthetic_control_messages(
-                                    _result_messages,
-                                    current_turn_has_visible_answer=
-                                    (
-                                        _current_turn_has_visible_assistant_answer(
-                                            _previous_context_messages,
-                                            current_user_text=msg_text,
-                                        )
-                                        or _current_turn_has_visible_assistant_answer(
-                                            _previous_messages,
-                                            current_user_text=msg_text,
-                                        )
-                                    ),
-                                )
-                                _next_context_messages = _restore_reasoning_metadata(
+                                _result_messages, _next_context_messages = _prepare_marker_clean_writeback(
                                     _previous_context_messages,
                                     _result_messages,
                                 )
-                                # Mint ids on the shared result rows BEFORE dedupe
-                                # deep-copies any stale-user boundary row, so both
-                                # arrays share the id (#5564).
-                                _assign_stable_message_ids(
-                                    _result_messages, _previous_messages, _previous_context_messages
-                                )
-                                _next_context_messages = _dedupe_replayed_context_messages(
-                                    _previous_context_messages,
-                                    _next_context_messages,
-                                    msg_text,
-                                )
+                                if _result_messages:
+                                    # Mint ids on the shared result rows BEFORE dedupe
+                                    # deep-copies any stale-user boundary row, so both
+                                    # arrays share the id (#5564).
+                                    _assign_stable_message_ids(
+                                        _result_messages, _previous_messages, _previous_context_messages
+                                    )
+                                    _next_context_messages = _dedupe_replayed_context_messages(
+                                        _previous_context_messages,
+                                        _next_context_messages,
+                                        msg_text,
+                                    )
                                 s.context_messages = _deduplicate_context_messages(_next_context_messages)
                                 s.messages = _merge_display_messages_after_agent_result(
                                     _previous_messages,
@@ -10902,34 +10875,22 @@ def _run_agent_streaming(
                                     )
                                     return
                                 _result_messages = _heal_result.get('messages') or _previous_context_messages
-                                _result_messages = _drop_synthetic_control_messages(
-                                    _result_messages,
-                                    current_turn_has_visible_answer=
-                                    (
-                                        _current_turn_has_visible_assistant_answer(
-                                            _previous_context_messages,
-                                            current_user_text=msg_text,
-                                        )
-                                        or _current_turn_has_visible_assistant_answer(
-                                            _previous_messages,
-                                            current_user_text=msg_text,
-                                        )
-                                    ),
-                                )
-                                _next_context_messages = _restore_reasoning_metadata(
-                                    _previous_context_messages, _result_messages,
-                                )
-                                # Mint ids on the shared result rows BEFORE dedupe
-                                # deep-copies any stale-user boundary row, so both
-                                # arrays share the id (#5564).
-                                _assign_stable_message_ids(
-                                    _result_messages, _previous_messages, _previous_context_messages
-                                )
-                                _next_context_messages = _dedupe_replayed_context_messages(
+                                _result_messages, _next_context_messages = _prepare_marker_clean_writeback(
                                     _previous_context_messages,
-                                    _next_context_messages,
-                                    msg_text,
+                                    _result_messages,
                                 )
+                                if _result_messages:
+                                    # Mint ids on the shared result rows BEFORE dedupe
+                                    # deep-copies any stale-user boundary row, so both
+                                    # arrays share the id (#5564).
+                                    _assign_stable_message_ids(
+                                        _result_messages, _previous_messages, _previous_context_messages
+                                    )
+                                    _next_context_messages = _dedupe_replayed_context_messages(
+                                        _previous_context_messages,
+                                        _next_context_messages,
+                                        msg_text,
+                                    )
                                 s.context_messages = _deduplicate_context_messages(_next_context_messages)
                                 s.messages = _merge_display_messages_after_agent_result(
                                     _previous_messages,
