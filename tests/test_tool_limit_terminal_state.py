@@ -22,6 +22,7 @@ def _run_streaming_with_fake_agent(
     prior_messages=None,
     prior_context_messages=None,
     msg_text="Do the long task.",
+    pending_started_at=1.0,
 ):
     session_dir = tmp_path / "sessions"
     session_dir.mkdir()
@@ -43,17 +44,25 @@ def _run_streaming_with_fake_agent(
 
     session_id = "tool_limit_session"
     stream_id = "stream-tool-limit"
+    session_messages = list(prior_messages or [])
+    session_context_messages = list(prior_context_messages or [])
+    for history in (session_messages, session_context_messages):
+        for message in history:
+            if isinstance(message, dict) and message.get("role") == "user":
+                message.setdefault("timestamp", 1.0)
+                message.setdefault("_source", "webui")
+                message.setdefault("attachments", [])
     session = Session(
         session_id=session_id,
         title="Tool limit test",
         workspace=str(tmp_path),
         model="gpt-4o",
-        messages=list(prior_messages or []),
-        context_messages=list(prior_context_messages or []),
+        messages=session_messages,
+        context_messages=session_context_messages,
     )
     session.active_stream_id = stream_id
     session.pending_user_message = msg_text
-    session.pending_started_at = 1.0
+    session.pending_started_at = pending_started_at
     session.save()
     models.SESSIONS[session_id] = session
     streaming.SESSIONS[session_id] = session
@@ -315,6 +324,97 @@ def test_verification_nudge_is_removed_while_corrective_followup_persists(
         assert [message.get("content") for message in payload[field]].count(
             "Fix the failing test."
         ) == 1
+
+
+@pytest.mark.parametrize("marker", ["_verification_stop_synthetic", "_pre_verify_synthetic"])
+def test_deferred_repeated_old_prompt_marked_followup_materializes_current_turn(
+    tmp_path,
+    monkeypatch,
+    marker,
+):
+    prompt = "Fix the failing test."
+    old_turn = [
+        {"role": "user", "content": prompt, "timestamp": 1.0},
+        {"role": "assistant", "content": "The earlier attempt is complete."},
+    ]
+    corrective = "Verification failed. I fixed the parser and reran the tests."
+    result = {
+        "messages": old_turn + [
+            {"role": "user", "content": "[System: verify the workspace]", marker: True},
+            {"role": "assistant", "content": corrective},
+        ],
+    }
+
+    _events, payload = _run_streaming_with_fake_agent(
+        tmp_path,
+        monkeypatch,
+        result,
+        prior_messages=old_turn,
+        prior_context_messages=old_turn,
+        msg_text=prompt,
+        pending_started_at=2.0,
+    )
+
+    expected = [
+        ("user", prompt),
+        ("assistant", "The earlier attempt is complete."),
+        ("user", prompt),
+        ("assistant", corrective),
+    ]
+    for field in ("messages", "context_messages"):
+        assert [(message["role"], message.get("content")) for message in payload[field]] == expected
+        assert [message.get("content") for message in payload[field]].count(prompt) == 2
+        assert marker not in json.dumps(payload[field])
+
+
+@pytest.mark.parametrize("marker", ["_verification_stop_synthetic", "_pre_verify_synthetic"])
+def test_eager_exact_checkpoint_does_not_duplicate_repeated_prompt(
+    tmp_path,
+    monkeypatch,
+    marker,
+):
+    prompt = "Fix the failing test."
+    old_turn = [
+        {"role": "user", "content": prompt, "timestamp": 1.0},
+        {"role": "assistant", "content": "The earlier attempt is complete."},
+    ]
+    current_checkpoint = [
+        {
+            "role": "user",
+            "content": prompt,
+            "timestamp": 2.0,
+            "_source": "webui",
+            "attachments": [],
+        },
+    ]
+    corrective = "Verification failed. I fixed the parser and reran the tests."
+    result = {
+        "messages": [
+            {"role": "user", "content": "[System: verify the workspace]", marker: True},
+            {"role": "assistant", "content": corrective},
+        ]
+    }
+
+    _events, payload = _run_streaming_with_fake_agent(
+        tmp_path,
+        monkeypatch,
+        result,
+        prior_messages=old_turn,
+        prior_context_messages=old_turn + current_checkpoint,
+        msg_text=prompt,
+        pending_started_at=2.0,
+    )
+
+    expected = [
+        ("user", prompt),
+        ("assistant", "The earlier attempt is complete."),
+        ("user", prompt),
+        ("assistant", corrective),
+    ]
+    for field in ("messages", "context_messages"):
+        assert [(message["role"], message.get("content")) for message in payload[field]] == expected
+        assert [message.get("content") for message in payload[field]].count(prompt) == 2
+        assert marker not in json.dumps(payload[field])
 
 
 @pytest.mark.parametrize("marker", ["_verification_stop_synthetic", "_pre_verify_synthetic"])

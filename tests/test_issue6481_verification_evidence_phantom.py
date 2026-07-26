@@ -39,10 +39,21 @@ def _verification_followup(marker, corrective=CORRECTIVE_ANSWER):
     ]
 
 
-def _merge(result_messages, previous=None, msg_text="Fix the failing test."):
+def _merge(
+    result_messages,
+    previous=None,
+    previous_context=None,
+    msg_text="Fix the failing test.",
+    writeback_provenance=None,
+):
     previous = list(previous or [{"role": "user", "content": "Fix the failing test."}])
+    previous_context = list(previous_context if previous_context is not None else previous)
     return streaming._merge_display_messages_after_agent_result(
-        previous, previous, result_messages, msg_text
+        previous,
+        previous_context,
+        result_messages,
+        msg_text,
+        verification_nudge_provenance=writeback_provenance,
     )
 
 
@@ -139,4 +150,98 @@ def test_unmarked_repeated_identical_prompt_materializes_new_user_row():
         ("assistant", "The first attempt."),
         ("user", "Fix the failing test."),
         ("assistant", "The second attempt."),
+    ]
+
+
+def test_marked_repeated_old_prompt_materializes_deferred_current_turn():
+    prompt = "Fix the failing test."
+    previous = [
+        {"role": "user", "content": prompt, "timestamp": 1.0},
+        {"role": "assistant", "content": "The earlier attempt is complete."},
+    ]
+    corrective = "Verification failed. I fixed the parser and reran the tests."
+
+    for marker in ("_verification_stop_synthetic", "_pre_verify_synthetic"):
+        merged = _merge(
+            previous
+            + [
+                {"role": "user", "content": "[System: verify the workspace]", marker: True},
+                {"role": "assistant", "content": corrective},
+            ],
+            previous=previous,
+            msg_text=prompt,
+            writeback_provenance={
+                "verification_nudge_seen": True,
+                "active_turn_identity": {
+                    "stream_id": "direct-stream",
+                    "text": prompt,
+                    "timestamp": 2.0,
+                    "source": "webui",
+                    "attachments": [],
+                },
+            },
+        )
+
+        assert _role_content_sequence(merged) == [
+            ("user", prompt),
+            ("assistant", "The earlier attempt is complete."),
+            ("user", prompt),
+            ("assistant", corrective),
+        ]
+        assert [message.get("content") for message in merged].count(prompt) == 2
+
+
+def test_context_only_exact_checkpoint_does_not_suppress_display_boundary():
+    prompt = "Fix the failing test."
+    previous_display = [
+        {"role": "user", "content": prompt, "timestamp": 1.0},
+        {"role": "assistant", "content": "The earlier attempt is complete."},
+    ]
+    previous_context = previous_display + [
+        {
+            "role": "user",
+            "content": prompt,
+            "timestamp": 2.0,
+            "_source": "webui",
+            "attachments": [],
+        },
+    ]
+    corrective = "Verification failed. I fixed the parser and reran the tests."
+    aligned_display, _ = streaming._align_active_turn_boundaries(
+        previous_display,
+        previous_context,
+        {
+            "stream_id": "direct-stream",
+            "text": prompt,
+            "timestamp": 2.0,
+            "source": "webui",
+            "attachments": [],
+        },
+    )
+
+    merged = _merge(
+        [
+            {"role": "user", "content": "[System: verify the workspace]", "_verification_stop_synthetic": True},
+            {"role": "assistant", "content": corrective},
+        ],
+        previous=aligned_display,
+        previous_context=previous_context,
+        msg_text=prompt,
+        writeback_provenance={
+            "verification_nudge_seen": True,
+            "active_turn_identity": {
+                "stream_id": "direct-stream",
+                "text": prompt,
+                "timestamp": 2.0,
+                "source": "webui",
+                "attachments": [],
+            },
+        },
+    )
+
+    assert _role_content_sequence(merged) == [
+        ("user", prompt),
+        ("assistant", "The earlier attempt is complete."),
+        ("user", prompt),
+        ("assistant", corrective),
     ]
