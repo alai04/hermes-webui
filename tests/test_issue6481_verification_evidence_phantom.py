@@ -1,5 +1,7 @@
 """Regression coverage for issue #6481 verification follow-up contracts."""
 
+import types
+
 from api import streaming
 
 
@@ -39,6 +41,21 @@ def _verification_followup(marker, corrective=CORRECTIVE_ANSWER):
     ]
 
 
+def _writeback_provenance(*, prompt, timestamp, current_turn_user_idx, turn_id="turn-current", token="stream:turn"):
+    return {
+        "verification_nudge_seen": True,
+        "active_turn_identity": {
+            "token": token,
+            "text": prompt,
+            "timestamp": timestamp,
+            "source": "webui",
+            "attachments": [],
+            "current_turn_user_idx": current_turn_user_idx,
+            "turn_id": turn_id,
+        },
+    }
+
+
 def _merge(
     result_messages,
     previous=None,
@@ -72,6 +89,11 @@ def test_corrective_followup_survives_after_attempted_answer_for_both_markers():
         merged = _merge(
             previous + _verification_followup(marker),
             previous=previous,
+            writeback_provenance=_writeback_provenance(
+                prompt="Fix the failing test.",
+                timestamp=1.0,
+                current_turn_user_idx=0,
+            ),
         )
 
         assert _role_content_sequence(merged) == _role_content_sequence(
@@ -87,6 +109,11 @@ def test_delta_only_followup_preserves_corrective_answer():
         merged = _merge(
             _verification_followup(marker),
             previous=previous,
+            writeback_provenance=_writeback_provenance(
+                prompt="Fix the failing test.",
+                timestamp=1.0,
+                current_turn_user_idx=0,
+            ),
         )
 
         assert _role_content_sequence(merged) == _role_content_sequence(
@@ -101,6 +128,11 @@ def test_first_post_nudge_answer_survives_when_no_attempted_answer_exists():
         merged = _merge(
             previous + _verification_followup(marker),
             previous=previous,
+            writeback_provenance=_writeback_provenance(
+                prompt="Fix the failing test.",
+                timestamp=1.0,
+                current_turn_user_idx=0,
+            ),
         )
 
         assert _role_content_sequence(merged) == _role_content_sequence(
@@ -170,16 +202,12 @@ def test_marked_repeated_old_prompt_materializes_deferred_current_turn():
             ],
             previous=previous,
             msg_text=prompt,
-            writeback_provenance={
-                "verification_nudge_seen": True,
-                "active_turn_identity": {
-                    "stream_id": "direct-stream",
-                    "text": prompt,
-                    "timestamp": 2.0,
-                    "source": "webui",
-                    "attachments": [],
-                },
-            },
+            writeback_provenance=_writeback_provenance(
+                prompt=prompt,
+                timestamp=2.0,
+                current_turn_user_idx=len(previous),
+                token="direct-stream:2",
+            ),
         )
 
         assert _role_content_sequence(merged) == [
@@ -204,19 +232,19 @@ def test_context_only_exact_checkpoint_does_not_suppress_display_boundary():
             "timestamp": 2.0,
             "_source": "webui",
             "attachments": [],
+            "_active_turn_token": "direct-stream:2",
         },
     ]
     corrective = "Verification failed. I fixed the parser and reran the tests."
-    aligned_display, _ = streaming._align_active_turn_boundaries(
+    aligned_display, _ = streaming._align_current_turn_display(
         previous_display,
         previous_context,
-        {
-            "stream_id": "direct-stream",
-            "text": prompt,
-            "timestamp": 2.0,
-            "source": "webui",
-            "attachments": [],
-        },
+        _writeback_provenance(
+            prompt=prompt,
+            timestamp=2.0,
+            current_turn_user_idx=2,
+            token="direct-stream:2",
+        )["active_turn_identity"],
     )
 
     merged = _merge(
@@ -227,16 +255,12 @@ def test_context_only_exact_checkpoint_does_not_suppress_display_boundary():
         previous=aligned_display,
         previous_context=previous_context,
         msg_text=prompt,
-        writeback_provenance={
-            "verification_nudge_seen": True,
-            "active_turn_identity": {
-                "stream_id": "direct-stream",
-                "text": prompt,
-                "timestamp": 2.0,
-                "source": "webui",
-                "attachments": [],
-            },
-        },
+        writeback_provenance=_writeback_provenance(
+            prompt=prompt,
+            timestamp=2.0,
+            current_turn_user_idx=2,
+            token="direct-stream:2",
+        ),
     )
 
     assert _role_content_sequence(merged) == [
@@ -245,3 +269,129 @@ def test_context_only_exact_checkpoint_does_not_suppress_display_boundary():
         ("user", prompt),
         ("assistant", corrective),
     ]
+
+
+def test_shared_settlement_owner_contract():
+    prompt = "Fix the failing test."
+    previous = [
+        {"role": "user", "content": prompt, "timestamp": 1.1},
+        {"role": "assistant", "content": "The earlier attempt is complete."},
+    ]
+    result_messages = previous + [
+        {"role": "user", "content": "[System: verify the workspace]", "_verification_stop_synthetic": True},
+        {"role": "assistant", "content": CORRECTIVE_ANSWER},
+    ]
+    session = types.SimpleNamespace(messages=list(previous), context_messages=list(previous))
+
+    streaming._settle_result_messages(
+        session,
+        previous,
+        previous,
+        result_messages,
+        prompt,
+        "webui",
+        _writeback_provenance(
+            prompt=prompt,
+            timestamp=1.9,
+            current_turn_user_idx=len(previous),
+            token="direct-stream:1.9",
+        )["active_turn_identity"],
+    )
+
+    expected = [
+        ("user", prompt),
+        ("assistant", "The earlier attempt is complete."),
+        ("user", prompt),
+        ("assistant", CORRECTIVE_ANSWER),
+    ]
+    assert _role_content_sequence(session.messages) == expected
+    assert _role_content_sequence(session.context_messages) == expected
+
+
+def test_untokened_legacy_row_fails_closed():
+    prompt = "Fix the failing test."
+    previous_display = [
+        {"role": "user", "content": prompt, "timestamp": 1.1},
+        {"role": "assistant", "content": "The earlier attempt is complete."},
+    ]
+    previous_context = previous_display + [
+        {
+            "role": "user",
+            "content": prompt,
+            "timestamp": 1.9,
+            "_source": "webui",
+            "attachments": [],
+        },
+    ]
+
+    merged = _merge(
+        [
+            {"role": "user", "content": "[System: verify the workspace]", "_verification_stop_synthetic": True},
+            {"role": "assistant", "content": CORRECTIVE_ANSWER},
+        ],
+        previous=previous_display,
+        previous_context=previous_context,
+        msg_text=prompt,
+        writeback_provenance=_writeback_provenance(
+            prompt=prompt,
+            timestamp=1.9,
+            current_turn_user_idx=2,
+            token="direct-stream:1.9",
+        ),
+    )
+
+    assert _role_content_sequence(merged) == [
+        ("user", prompt),
+        ("assistant", "The earlier attempt is complete."),
+        ("user", prompt),
+        ("assistant", CORRECTIVE_ANSWER),
+    ]
+
+
+def test_materialized_webui_user_omits_source():
+    message = streaming._materialize_active_turn_user(
+        _writeback_provenance(
+            prompt="Fix the failing test.",
+            timestamp=1.9,
+            current_turn_user_idx=2,
+            token="direct-stream:1.9",
+        )["active_turn_identity"],
+        "Fix the failing test.",
+        "webui",
+    )
+
+    assert message["role"] == "user"
+    assert message["content"] == "Fix the failing test."
+    assert message["_active_turn_token"] == "direct-stream:1.9"
+    assert "_source" not in message
+
+
+def test_materialized_process_wakeup_user_has_wakeup_meta():
+    wakeup_text = (
+        "[IMPORTANT: Background process bg-1 completed (exit_code=0).\n"
+        "Command: python worker.py\n"
+        "Output:\n"
+        "done]"
+    )
+    message = streaming._materialize_active_turn_user(
+        {
+            "token": "wakeup-stream:1.9",
+            "text": wakeup_text,
+            "timestamp": 1.9,
+            "source": "process_wakeup",
+            "attachments": [],
+            "current_turn_user_idx": 0,
+            "turn_id": "turn-wakeup",
+        },
+        wakeup_text,
+        "process_wakeup",
+    )
+
+    assert message["_source"] == "process_wakeup"
+    assert message["_active_turn_token"] == "wakeup-stream:1.9"
+    assert message["_wakeup_meta"] == {
+        "type": "completion",
+        "task_id": "bg-1",
+        "command": "python worker.py",
+        "exit_code": 0,
+    }
