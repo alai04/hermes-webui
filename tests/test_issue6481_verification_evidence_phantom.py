@@ -17,7 +17,11 @@ VERIFICATION_EVIDENCE = {
 
 def _current_turn_prefix(*, include_attempted_answer):
     messages = [
-        {"role": "user", "content": "Fix the failing test."},
+        {
+            "role": "user",
+            "content": "Fix the failing test.",
+            "_active_turn_token": "stream:turn",
+        },
         {
             "role": "assistant",
             "content": [{"type": "tool_use", "name": "terminal", "input": {"cmd": "pytest"}}],
@@ -279,6 +283,7 @@ def test_divergent_context_index_does_not_relabel_same_text_display_row():
         {"role": "assistant", "content": "The earlier attempt is complete."},
     ]
     previous_context = [
+        {"role": "user", "content": prompt, "timestamp": 1.0, "attachments": []},
         {
             "role": "user",
             "content": prompt,
@@ -306,6 +311,42 @@ def test_divergent_context_index_does_not_relabel_same_text_display_row():
     ]
     assert aligned_display[0].get("_active_turn_token") is None
     assert aligned_display[-1]["_active_turn_token"] == token
+
+
+def test_missing_exact_checkpoint_materializes_current_turn_without_retokening_history():
+    prompt = "Fix the failing test."
+    token = "direct-stream:1.9"
+    previous_display = [
+        {"role": "user", "content": prompt, "timestamp": 1.1},
+        {"role": "assistant", "content": "The earlier attempt is complete."},
+    ]
+    previous_context = [
+        {"role": "user", "content": prompt, "timestamp": 1.1, "attachments": []},
+        {"role": "assistant", "content": "The earlier attempt is complete."},
+    ]
+
+    aligned_display, aligned_context = streaming._align_current_turn_display(
+        previous_display,
+        previous_context,
+        _writeback_provenance(
+            prompt=prompt,
+            timestamp=1.9,
+            current_turn_user_idx=0,
+            token=token,
+        )["active_turn_identity"],
+    )
+
+    expected = [
+        ("user", prompt),
+        ("assistant", "The earlier attempt is complete."),
+        ("user", prompt),
+    ]
+    assert _role_content_sequence(aligned_display) == expected
+    assert _role_content_sequence(aligned_context) == expected
+    assert aligned_display[0].get("_active_turn_token") is None
+    assert aligned_context[0].get("_active_turn_token") is None
+    assert aligned_display[-1]["_active_turn_token"] == token
+    assert aligned_context[-1]["_active_turn_token"] == token
 
 
 def test_shared_settlement_owner_contract():

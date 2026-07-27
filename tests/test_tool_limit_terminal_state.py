@@ -645,7 +645,11 @@ def test_missing_agent_authority_fails_closed(tmp_path, monkeypatch):
 @pytest.mark.parametrize("marker", ["_verification_stop_synthetic", "_pre_verify_synthetic"])
 def test_synthetic_only_verification_delta_preserves_prior_histories(tmp_path, monkeypatch, marker):
     prior_turn = [
-        {"role": "user", "content": "Fix the failing test."},
+        {
+            "role": "user",
+            "content": "Fix the failing test.",
+            "_active_turn_token": build_active_turn_token("stream-tool-limit", 1.0),
+        },
         {"role": "assistant", "content": [{"type": "tool_use", "name": "terminal"}]},
         {
             "role": "tool",
@@ -945,24 +949,14 @@ def test_streaming_empty_result_same_text_does_not_treat_prior_assistant_as_curr
     assert payload["messages"][-1]["_error"] is True
 
 
-def test_streaming_empty_result_divergent_context_index_does_not_reuse_historical_assistant(
+def test_streaming_empty_result_without_exact_checkpoint_materializes_current_user(
     tmp_path,
     monkeypatch,
 ):
     prompt = "Fix the failing test."
-    current_token = build_active_turn_token("stream-tool-limit", 1.9)
     prior = [
-        {"role": "user", "content": prompt, "timestamp": 1.0},
+        {"role": "user", "content": prompt, "timestamp": 1.1},
         {"role": "assistant", "content": "The earlier attempt is complete."},
-    ]
-    context_only_current = [
-        {
-            "role": "user",
-            "content": prompt,
-            "timestamp": 1.9,
-            "attachments": [],
-            "_active_turn_token": current_token,
-        },
     ]
     result = {"messages": []}
 
@@ -971,7 +965,7 @@ def test_streaming_empty_result_divergent_context_index_does_not_reuse_historica
         monkeypatch,
         result,
         prior_messages=prior,
-        prior_context_messages=context_only_current,
+        prior_context_messages=prior,
         msg_text=prompt,
         pending_started_at=1.9,
         current_turn_user_idx=0,
@@ -987,5 +981,100 @@ def test_streaming_empty_result_divergent_context_index_does_not_reuse_historica
         ("user", prompt),
     ]
     assert payload["messages"][0].get("_active_turn_token") is None
+    assert payload["messages"][2]["_active_turn_token"] == build_active_turn_token(
+        "stream-tool-limit",
+        1.9,
+    )
+    assert payload["messages"][-1]["role"] == "assistant"
+    assert payload["messages"][-1]["_error"] is True
+
+
+def test_streaming_empty_result_divergent_context_index_does_not_reuse_historical_assistant(
+    tmp_path,
+    monkeypatch,
+):
+    prompt = "Fix the failing test."
+    current_token = build_active_turn_token("stream-tool-limit", 1.9)
+    prior = [
+        {"role": "user", "content": prompt, "timestamp": 1.0},
+        {"role": "assistant", "content": "The earlier attempt is complete."},
+    ]
+    prior_context = [
+        {"role": "user", "content": prompt, "timestamp": 1.0, "attachments": []},
+        {
+            "role": "user",
+            "content": prompt,
+            "timestamp": 1.9,
+            "attachments": [],
+            "_active_turn_token": current_token,
+        },
+    ]
+    result = {"messages": []}
+
+    events, payload = _run_streaming_with_fake_agent(
+        tmp_path,
+        monkeypatch,
+        result,
+        prior_messages=prior,
+        prior_context_messages=prior_context,
+        msg_text=prompt,
+        pending_started_at=1.9,
+        current_turn_user_idx=0,
+    )
+
+    apperror_payloads = [event_payload for event, event_payload in events if event == "apperror"]
+    assert apperror_payloads, "expected silent-failure apperror"
+    assert apperror_payloads[-1]["type"] == "no_response"
+    assert not [event_payload for event, event_payload in events if event == "done"]
+    assert [(message["role"], message.get("content")) for message in payload["messages"][:-1]] == [
+        ("user", prompt),
+        ("assistant", "The earlier attempt is complete."),
+        ("user", prompt),
+    ]
+    assert payload["messages"][0].get("_active_turn_token") is None
+    assert payload["messages"][-1]["role"] == "assistant"
+    assert payload["messages"][-1]["_error"] is True
+
+
+def test_streaming_tool_limit_empty_result_without_exact_checkpoint_materializes_current_user(
+    tmp_path,
+    monkeypatch,
+):
+    prompt = "Fix the failing test."
+    prior = [
+        {"role": "user", "content": prompt, "timestamp": 1.1},
+        {"role": "assistant", "content": "The earlier attempt is complete."},
+    ]
+    result = {
+        "turn_exit_reason": "max_iterations_reached(30/30)",
+        "messages": [],
+    }
+
+    events, payload = _run_streaming_with_fake_agent(
+        tmp_path,
+        monkeypatch,
+        result,
+        prior_messages=prior,
+        prior_context_messages=prior,
+        msg_text=prompt,
+        pending_started_at=1.9,
+        current_turn_user_idx=0,
+    )
+
+    apperror_payloads = [event_payload for event, event_payload in events if event == "apperror"]
+    assert apperror_payloads, "expected tool-limit apperror"
+    assert apperror_payloads[-1]["type"] == "tool_limit_reached"
+    assert apperror_payloads[-1]["terminal_state"] == "tool_limit_reached"
+    assert not [event_payload for event, event_payload in events if event == "done"]
+    assert [(message["role"], message.get("content")) for message in payload["messages"][:-1]] == [
+        ("user", prompt),
+        ("assistant", "The earlier attempt is complete."),
+        ("user", prompt),
+    ]
+    assert payload["messages"][0].get("_active_turn_token") is None
+    assert payload["messages"][2]["_active_turn_token"] == build_active_turn_token(
+        "stream-tool-limit",
+        1.9,
+    )
     assert payload["messages"][-1]["role"] == "assistant"
     assert payload["messages"][-1]["_error"] is True

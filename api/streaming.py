@@ -1550,29 +1550,14 @@ def _mark_active_turn_checkpoint_in_history(messages, identity, msg_text, *, all
     return messages, True
 
 
-def _display_row_can_accept_context_index(display, context, identity, msg_text):
-    if not isinstance(identity, dict) or not _active_turn_boundary_is_valid(identity):
-        return False
-    idx = identity['current_turn_user_idx']
-    if idx < 0 or idx >= len(display) or idx >= len(context):
-        return False
-    expected_text = identity.get('text') if identity.get('text') is not None else msg_text
-    display_row = display[idx]
-    context_row = context[idx]
-    if (
-        not isinstance(display_row, dict)
-        or not isinstance(context_row, dict)
-        or display_row.get('role') != 'user'
-        or context_row.get('role') != 'user'
-        or _normalize_user_text(display_row.get('content')) != _normalize_user_text(expected_text)
-        or _normalize_user_text(context_row.get('content')) != _normalize_user_text(expected_text)
-    ):
-        return False
-    return (
-        display_row.get('timestamp') == context_row.get('timestamp')
-        and (display_row.get('_source') or 'webui') == (context_row.get('_source') or 'webui')
-        and copy.deepcopy(display_row.get('attachments') or []) == copy.deepcopy(context_row.get('attachments') or [])
-    )
+def _owner_projection_current_turn_row(messages, identity):
+    messages = list(messages or [])
+    if not isinstance(identity, dict):
+        return None
+    for message in messages:
+        if _active_turn_token_matches(message, identity):
+            return copy.deepcopy(message)
+    return None
 
 
 def _find_active_turn_checkpoint_index(result_messages, previous_context, identity, msg_text):
@@ -1685,18 +1670,20 @@ def _align_current_turn_display(previous_display, previous_context, identity):
         identity.get('text'),
         allow_index_fallback=False,
     )
-    if (
-        not _active_turn_has_checkpoint(display, identity)
-        and _display_row_can_accept_context_index(display, context, identity, identity.get('text'))
-    ):
-        _mark_active_turn_checkpoint(display[identity['current_turn_user_idx']], identity)
     if _active_turn_has_checkpoint(display, identity):
         return display, context
-    checkpoint = next(
-        (message for message in context if _active_turn_token_matches(message, identity)),
-        None,
+    checkpoint = _owner_projection_current_turn_row(
+        context,
+        identity,
     )
-    if checkpoint is not None:
+    if checkpoint is None and identity.get('token'):
+        checkpoint = _materialize_active_turn_user(
+            identity,
+            identity.get('text'),
+            identity.get('source') or 'webui',
+        )
+        context.append(copy.deepcopy(checkpoint))
+    if checkpoint is not None and not _active_turn_has_checkpoint(display, identity):
         display.append(copy.deepcopy(checkpoint))
     return display, context
 
@@ -1714,7 +1701,13 @@ def _prepare_marker_clean_writeback(
         'verification_nudge_seen': has_verification_nudge,
         'active_turn_identity': copy.deepcopy(active_turn_identity),
     }
-    if cleaned or not result_messages:
+    if not result_messages:
+        return (
+            cleaned,
+            list(previous_context_messages or []),
+            provenance,
+        )
+    if cleaned:
         return (
             cleaned,
             _restore_reasoning_metadata(previous_context_messages, cleaned),
@@ -1759,7 +1752,11 @@ def _settle_result_messages(
             msg_text,
             source,
         )
-    session.context_messages = _deduplicate_context_messages(next_context_messages)
+    session.context_messages = (
+        _deduplicate_context_messages(next_context_messages)
+        if result_messages
+        else list(next_context_messages or [])
+    )
     if result_messages:
         session.context_messages = _settle_current_turn_boundary(
             previous_context_messages,
@@ -5031,6 +5028,7 @@ def _deduplicate_context_messages(messages):
         return messages
     seen = set()
     deduped = []
+    user_exact_index = {}
     for msg in messages:
         if _is_context_compression_marker(msg):
             marker_key = (
@@ -5049,6 +5047,26 @@ def _deduplicate_context_messages(messages):
             deduped.append(msg)
             continue
         key = _message_identity(msg)
+        if isinstance(msg, dict) and msg.get('role') == 'user' and key is not None:
+            user_exact_key = (
+                key,
+                msg.get('timestamp'),
+                msg.get('_ts'),
+                msg.get('_source') or 'webui',
+                json.dumps(msg.get('attachments') or [], sort_keys=True, ensure_ascii=False),
+            )
+            prior_exact_idx = user_exact_index.get(user_exact_key)
+            if msg.get('_active_turn_token'):
+                if prior_exact_idx is not None:
+                    deduped[prior_exact_idx] = msg
+                    continue
+                if key in seen:
+                    deduped.append(msg)
+                    user_exact_index[user_exact_key] = len(deduped) - 1
+                    continue
+            elif prior_exact_idx is not None:
+                continue
+            user_exact_index[user_exact_key] = len(deduped)
         if key is not None and key in seen:
             continue
         if key is not None:
@@ -6142,25 +6160,11 @@ def _merge_display_messages_after_agent_result(
         for message in result_messages
     )
     _active_turn_identity = _writeback_provenance.get('active_turn_identity')
-    previous_display, _ = _mark_active_turn_checkpoint_in_history(
+    previous_display, _ = _align_current_turn_display(
         previous_display,
+        previous_context,
         _active_turn_identity,
-        msg_text,
-        allow_index_fallback=False,
     )
-    if (
-        not _active_turn_has_checkpoint(previous_display, _active_turn_identity)
-        and _display_row_can_accept_context_index(
-            previous_display,
-            previous_context,
-            _active_turn_identity,
-            msg_text,
-        )
-    ):
-        _mark_active_turn_checkpoint(
-            previous_display[_active_turn_identity['current_turn_user_idx']],
-            _active_turn_identity,
-        )
     # Same marker filter for the model-history inputs: the synthetic verify-loop
     # answer/nudge live in the agent's returned messages and prior context, and
     # would otherwise slip into the merged transcript as a real delta. (#5334)
@@ -6508,12 +6512,25 @@ def _turn_transcript_lacks_final_assistant_answer(
     msg_text,
     source: str = "webui",
     drop_replayed_assistant: bool = False,
+    active_turn_identity=None,
 ) -> bool:
     """Return True when an already-merged transcript still lacks a final assistant answer."""
     merged_messages = list(merged_messages or [])
     previous_display = list(previous_display or [])
-    current_user_idx = _find_current_user_turn(merged_messages, msg_text)
-    if current_user_idx is None or current_user_idx < len(previous_display):
+    current_user_token_idx = next(
+        (
+            idx for idx, message in enumerate(merged_messages)
+            if _active_turn_token_matches(message, active_turn_identity)
+        ),
+        None,
+    )
+    current_user_idx = current_user_token_idx
+    if current_user_idx is None:
+        current_user_idx = _find_current_user_turn(merged_messages, msg_text)
+    if current_user_idx is None or (
+        current_user_token_idx is None
+        and current_user_idx < len(previous_display)
+    ):
         # The active turn lives after the durable transcript boundary. If the
         # merged display only exposes an older user row, materialize the pending
         # prompt so a replayed assistant row cannot satisfy the wrong turn.
@@ -6560,15 +6577,26 @@ def _merged_transcript_lacks_final_assistant_answer(
     msg_text,
     source: str = "webui",
     drop_replayed_assistant: bool = False,
+    active_turn_identity=None,
 ) -> bool:
     """Return True when the current turn still lacks a final assistant answer."""
     previous_display = list(previous_display or [])
+    _verification_nudge_seen = any(
+        isinstance(message, dict)
+        and message.get('role') == 'user'
+        and _is_synthetic_control_message(message)
+        for message in result_messages or []
+    )
     merged_messages = _merge_display_messages_after_agent_result(
         previous_display,
         previous_context,
         _restore_reasoning_metadata(previous_display, result_messages),
         msg_text,
         source=source,
+        verification_nudge_provenance={
+            'verification_nudge_seen': _verification_nudge_seen,
+            'active_turn_identity': active_turn_identity,
+        },
     )
     return _turn_transcript_lacks_final_assistant_answer(
         merged_messages,
@@ -6576,6 +6604,7 @@ def _merged_transcript_lacks_final_assistant_answer(
         msg_text,
         source=source,
         drop_replayed_assistant=drop_replayed_assistant,
+        active_turn_identity=active_turn_identity,
     )
 
 
@@ -9440,12 +9469,18 @@ def _run_agent_streaming(
                     state_messages=_external_state_messages,
                 ) or []
             )
-            _previous_context_messages = _new_turn_context_from_messages(
+            _previous_owner_context_messages = list(
                 reconciled_state_db_messages_for_session(
                     s,
                     prefer_context=True,
                     state_messages=_external_state_messages,
-                ),
+                ) or []
+            )
+            _previous_owner_context_messages = _deduplicate_context_messages(
+                _previous_owner_context_messages
+            )
+            _previous_context_messages = _new_turn_context_from_messages(
+                _previous_owner_context_messages,
                 msg_text,
             )
             # Dedup before feeding to agent — merge_session_messages_append_only
@@ -9650,7 +9685,9 @@ def _run_agent_streaming(
                         return
                 with _stream_writeback_stage(_writeback_timings, "merge_result"):
                     _tool_limit_reached = _agent_result_tool_limit_reached(result)
-                    _result_messages = result.get('messages') or _previous_context_messages
+                    _result_messages = result.get('messages')
+                    if _result_messages is None:
+                        _result_messages = _previous_context_messages
                     _result_messages = _drop_synthetic_max_iteration_summary_requests(
                         _result_messages,
                         enabled=_tool_limit_reached,
@@ -9692,7 +9729,7 @@ def _run_agent_streaming(
                     _result_messages = _settle_result_messages(
                         s,
                         _previous_messages,
-                        _previous_context_messages,
+                        _previous_owner_context_messages,
                         _result_messages,
                         msg_text,
                         _turn_pending_source,
@@ -9872,18 +9909,19 @@ def _run_agent_streaming(
                 )
                 _saved_transcript_lacks_final_answer = _merged_transcript_lacks_final_assistant_answer(
                     _previous_messages,
-                    _previous_context_messages,
+                    _previous_owner_context_messages,
                     _all_result_messages,
                     msg_text,
                     source=getattr(s, 'pending_user_source', None) or 'webui',
                     drop_replayed_assistant=_drop_replayed_assistant,
+                    active_turn_identity=_active_turn_identity,
                 )
                 if (
                     not _all_result_messages
                     and _current_turn_already_has_visible_assistant_answer(
                         _align_current_turn_display(
                             _previous_messages,
-                            _previous_context_messages,
+                            _previous_owner_context_messages,
                             _active_turn_identity,
                         )[0],
                         active_turn_identity=_active_turn_identity,
@@ -10029,7 +10067,9 @@ def _run_agent_streaming(
                                 # evaluates False on next conceptual pass.
                                 # Since we're in a flat block, directly run the
                                 # post-result merge logic here.
-                                _result_messages = result.get('messages') or _previous_context_messages
+                                _result_messages = result.get('messages')
+                                if _result_messages is None:
+                                    _result_messages = _previous_context_messages
                                 _result_messages = _drop_synthetic_max_iteration_summary_requests(
                                     _result_messages,
                                     enabled=_agent_result_tool_limit_reached(result),
@@ -10037,7 +10077,7 @@ def _run_agent_streaming(
                                 _result_messages = _settle_result_messages(
                                     s,
                                     _previous_messages,
-                                    _previous_context_messages,
+                                    _previous_owner_context_messages,
                                     _result_messages,
                                     msg_text,
                                     _turn_pending_source,
@@ -11247,11 +11287,13 @@ def _run_agent_streaming(
                                         getattr(s, 'active_stream_id', None),
                                     )
                                     return
-                                _result_messages = _heal_result.get('messages') or _previous_context_messages
+                                _result_messages = _heal_result.get('messages')
+                                if _result_messages is None:
+                                    _result_messages = _previous_context_messages
                                 _result_messages = _settle_result_messages(
                                     s,
                                     _previous_messages,
-                                    _previous_context_messages,
+                                    _previous_owner_context_messages,
                                     _result_messages,
                                     msg_text,
                                     _turn_pending_source,
