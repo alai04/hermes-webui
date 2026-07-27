@@ -7,6 +7,7 @@ from pathlib import Path
 import pytest
 
 from api import models
+from api.process_event_utils import build_active_turn_token
 from api import streaming
 from api.models import Session
 
@@ -491,7 +492,7 @@ def test_eager_checkpoint_reused_by_exact_token(tmp_path, monkeypatch, marker):
             "timestamp": 1.9,
             "_source": "webui",
             "attachments": [],
-            "_active_turn_token": "stream-tool-limit:1.9",
+            "_active_turn_token": build_active_turn_token("stream-tool-limit", 1.9),
         },
     ]
     corrective = "Verification failed. I fixed the parser and reran the tests."
@@ -940,5 +941,51 @@ def test_streaming_empty_result_same_text_does_not_treat_prior_assistant_as_curr
         ("assistant", "The earlier attempt is complete."),
         ("user", prompt),
     ]
+    assert payload["messages"][-1]["role"] == "assistant"
+    assert payload["messages"][-1]["_error"] is True
+
+
+def test_streaming_empty_result_divergent_context_index_does_not_reuse_historical_assistant(
+    tmp_path,
+    monkeypatch,
+):
+    prompt = "Fix the failing test."
+    current_token = build_active_turn_token("stream-tool-limit", 1.9)
+    prior = [
+        {"role": "user", "content": prompt, "timestamp": 1.0},
+        {"role": "assistant", "content": "The earlier attempt is complete."},
+    ]
+    context_only_current = [
+        {
+            "role": "user",
+            "content": prompt,
+            "timestamp": 1.9,
+            "attachments": [],
+            "_active_turn_token": current_token,
+        },
+    ]
+    result = {"messages": []}
+
+    events, payload = _run_streaming_with_fake_agent(
+        tmp_path,
+        monkeypatch,
+        result,
+        prior_messages=prior,
+        prior_context_messages=context_only_current,
+        msg_text=prompt,
+        pending_started_at=1.9,
+        current_turn_user_idx=0,
+    )
+
+    apperror_payloads = [event_payload for event, event_payload in events if event == "apperror"]
+    assert apperror_payloads, "expected silent-failure apperror"
+    assert apperror_payloads[-1]["type"] == "no_response"
+    assert not [event_payload for event, event_payload in events if event == "done"]
+    assert [(message["role"], message.get("content")) for message in payload["messages"][:-1]] == [
+        ("user", prompt),
+        ("assistant", "The earlier attempt is complete."),
+        ("user", prompt),
+    ]
+    assert payload["messages"][0].get("_active_turn_token") is None
     assert payload["messages"][-1]["role"] == "assistant"
     assert payload["messages"][-1]["_error"] is True

@@ -1525,12 +1525,14 @@ def _mark_active_turn_checkpoint(message, identity):
     return message
 
 
-def _mark_active_turn_checkpoint_in_history(messages, identity, msg_text):
+def _mark_active_turn_checkpoint_in_history(messages, identity, msg_text, *, allow_index_fallback=True):
     messages = list(messages or [])
     if not isinstance(identity, dict):
         return messages, False
     if _active_turn_has_checkpoint(messages, identity):
         return messages, True
+    if not allow_index_fallback:
+        return messages, False
     if not _active_turn_boundary_is_valid(identity):
         return messages, False
     idx = identity['current_turn_user_idx']
@@ -1546,6 +1548,31 @@ def _mark_active_turn_checkpoint_in_history(messages, identity, msg_text):
         return messages, False
     _mark_active_turn_checkpoint(message, identity)
     return messages, True
+
+
+def _display_row_can_accept_context_index(display, context, identity, msg_text):
+    if not isinstance(identity, dict) or not _active_turn_boundary_is_valid(identity):
+        return False
+    idx = identity['current_turn_user_idx']
+    if idx < 0 or idx >= len(display) or idx >= len(context):
+        return False
+    expected_text = identity.get('text') if identity.get('text') is not None else msg_text
+    display_row = display[idx]
+    context_row = context[idx]
+    if (
+        not isinstance(display_row, dict)
+        or not isinstance(context_row, dict)
+        or display_row.get('role') != 'user'
+        or context_row.get('role') != 'user'
+        or _normalize_user_text(display_row.get('content')) != _normalize_user_text(expected_text)
+        or _normalize_user_text(context_row.get('content')) != _normalize_user_text(expected_text)
+    ):
+        return False
+    return (
+        display_row.get('timestamp') == context_row.get('timestamp')
+        and (display_row.get('_source') or 'webui') == (context_row.get('_source') or 'webui')
+        and copy.deepcopy(display_row.get('attachments') or []) == copy.deepcopy(context_row.get('attachments') or [])
+    )
 
 
 def _find_active_turn_checkpoint_index(result_messages, previous_context, identity, msg_text):
@@ -1656,7 +1683,13 @@ def _align_current_turn_display(previous_display, previous_context, identity):
         display,
         identity,
         identity.get('text'),
+        allow_index_fallback=False,
     )
+    if (
+        not _active_turn_has_checkpoint(display, identity)
+        and _display_row_can_accept_context_index(display, context, identity, identity.get('text'))
+    ):
+        _mark_active_turn_checkpoint(display[identity['current_turn_user_idx']], identity)
     if _active_turn_has_checkpoint(display, identity):
         return display, context
     checkpoint = next(
@@ -6113,7 +6146,21 @@ def _merge_display_messages_after_agent_result(
         previous_display,
         _active_turn_identity,
         msg_text,
+        allow_index_fallback=False,
     )
+    if (
+        not _active_turn_has_checkpoint(previous_display, _active_turn_identity)
+        and _display_row_can_accept_context_index(
+            previous_display,
+            previous_context,
+            _active_turn_identity,
+            msg_text,
+        )
+    ):
+        _mark_active_turn_checkpoint(
+            previous_display[_active_turn_identity['current_turn_user_idx']],
+            _active_turn_identity,
+        )
     # Same marker filter for the model-history inputs: the synthetic verify-loop
     # answer/nudge live in the agent's returned messages and prior context, and
     # would otherwise slip into the merged transcript as a real delta. (#5334)

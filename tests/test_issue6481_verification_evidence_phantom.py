@@ -271,6 +271,43 @@ def test_context_only_exact_checkpoint_does_not_suppress_display_boundary():
     ]
 
 
+def test_divergent_context_index_does_not_relabel_same_text_display_row():
+    prompt = "Fix the failing test."
+    token = "direct-stream:2"
+    previous_display = [
+        {"role": "user", "content": prompt, "timestamp": 1.0},
+        {"role": "assistant", "content": "The earlier attempt is complete."},
+    ]
+    previous_context = [
+        {
+            "role": "user",
+            "content": prompt,
+            "timestamp": 2.0,
+            "attachments": [],
+            "_active_turn_token": token,
+        },
+    ]
+
+    aligned_display, _ = streaming._align_current_turn_display(
+        previous_display,
+        previous_context,
+        _writeback_provenance(
+            prompt=prompt,
+            timestamp=2.0,
+            current_turn_user_idx=0,
+            token=token,
+        )["active_turn_identity"],
+    )
+
+    assert _role_content_sequence(aligned_display) == [
+        ("user", prompt),
+        ("assistant", "The earlier attempt is complete."),
+        ("user", prompt),
+    ]
+    assert aligned_display[0].get("_active_turn_token") is None
+    assert aligned_display[-1]["_active_turn_token"] == token
+
+
 def test_shared_settlement_owner_contract():
     prompt = "Fix the failing test."
     previous = [
