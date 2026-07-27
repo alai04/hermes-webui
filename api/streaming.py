@@ -1753,21 +1753,18 @@ def _settle_result_messages(
     return result_messages
 
 
-def _current_turn_already_has_visible_assistant_answer(messages, *, current_user_text=None):
-    """Return True when the current real user turn already has visible assistant prose."""
-    if current_user_text is not None:
-        current_user_row = {'role': 'user', 'content': current_user_text}
-        current_user_tail = _stale_user_tail_candidate(current_user_row)
-        if current_user_tail:
-            last_real_user = None
-            for msg in reversed(list(messages or [])):
-                if isinstance(msg, dict) and not _is_synthetic_control_message(msg) and msg.get('role') == 'user':
-                    last_real_user = msg
-                    break
-            if _stale_user_tail_candidate(last_real_user) != current_user_tail:
-                return False
-    for msg in reversed(list(messages or [])):
+def _current_turn_already_has_visible_assistant_answer(messages, *, active_turn_identity=None):
+    """Return True only when the token-owned current turn already has visible assistant prose."""
+    if not isinstance(active_turn_identity, dict) or not active_turn_identity.get('token'):
+        return False
+    current_turn_seen = False
+    for msg in messages or []:
         if not isinstance(msg, dict) or _is_synthetic_control_message(msg):
+            continue
+        if _active_turn_token_matches(msg, active_turn_identity):
+            current_turn_seen = True
+            continue
+        if not current_turn_seen:
             continue
         role = msg.get('role')
         if role == 'assistant' and _assistant_message_has_final_visible_text(msg) and not msg.get('_error'):
@@ -9836,15 +9833,13 @@ def _run_agent_streaming(
                 )
                 if (
                     not _all_result_messages
-                    and (
-                        _current_turn_already_has_visible_assistant_answer(
+                    and _current_turn_already_has_visible_assistant_answer(
+                        _align_current_turn_display(
                             _previous_messages,
-                            current_user_text=msg_text,
-                        )
-                        or _current_turn_already_has_visible_assistant_answer(
                             _previous_context_messages,
-                            current_user_text=msg_text,
-                        )
+                            _active_turn_identity,
+                        )[0],
+                        active_turn_identity=_active_turn_identity,
                     )
                 ):
                     _saved_transcript_lacks_final_answer = False

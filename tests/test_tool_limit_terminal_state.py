@@ -569,7 +569,7 @@ def test_tool_limit_exit_uses_shared_settlement_owner(tmp_path, monkeypatch, mar
 
 
 @pytest.mark.parametrize("marker", ["_verification_stop_synthetic", "_pre_verify_synthetic"])
-def test_exception_exit_uses_shared_settlement_owner(tmp_path, monkeypatch, marker):
+def test_shared_settlement_owner_handles_exception_style_delta(tmp_path, monkeypatch, marker):
     prompt = "Fix the failing test."
     old_turn = [
         {"role": "user", "content": prompt, "timestamp": 1.1},
@@ -906,4 +906,39 @@ def test_streaming_empty_result_messages_do_not_treat_prior_assistant_as_current
     assert apperror_payloads, "expected silent-failure apperror"
     assert apperror_payloads[-1]["type"] == "no_response"
     assert not [payload for event, payload in events if event == "done"]
+    assert payload["messages"][-1]["_error"] is True
+
+
+def test_streaming_empty_result_same_text_does_not_treat_prior_assistant_as_current_answer(
+    tmp_path,
+    monkeypatch,
+):
+    prompt = "Fix the failing test."
+    prior = [
+        {"role": "user", "content": prompt, "timestamp": 1.1},
+        {"role": "assistant", "content": "The earlier attempt is complete."},
+    ]
+    result = {"messages": []}
+
+    events, payload = _run_streaming_with_fake_agent(
+        tmp_path,
+        monkeypatch,
+        result,
+        prior_messages=prior,
+        prior_context_messages=prior,
+        msg_text=prompt,
+        pending_started_at=1.9,
+        current_turn_user_idx=len(prior),
+    )
+
+    apperror_payloads = [event_payload for event, event_payload in events if event == "apperror"]
+    assert apperror_payloads, "expected silent-failure apperror"
+    assert apperror_payloads[-1]["type"] == "no_response"
+    assert not [event_payload for event, event_payload in events if event == "done"]
+    assert [(message["role"], message.get("content")) for message in payload["messages"][:-1]] == [
+        ("user", prompt),
+        ("assistant", "The earlier attempt is complete."),
+        ("user", prompt),
+    ]
+    assert payload["messages"][-1]["role"] == "assistant"
     assert payload["messages"][-1]["_error"] is True
