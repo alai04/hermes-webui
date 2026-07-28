@@ -113,6 +113,7 @@ def _live_render_ownership_harness(*, move_to_bottom: bool) -> str:
     """Compose real input production with the production queued live-render restore."""
     js = UI_JS_PATH.read_text(encoding="utf-8")
     functions = [
+        "renderLiveAnchorActivityScene",
         "_recordNonMessageScrollIntent",
         "_captureMessageScrollSnapshot",
         "_messageScrollSnapshotInputChanged",
@@ -135,7 +136,6 @@ let _lastScrollTop=null, _lastMessageClientHeight=null;
 let _programmaticScroll=false, _programmaticScrollSetAt=0;
 let recordWrites=true;
 const callbacks=[];
-let delayedSnapshotPinned=null;
 const performance={{now(){{return 1;}}}};
 const el={{
   scrollHeight:90453, clientHeight:427,
@@ -147,7 +147,20 @@ const el={{
 }};
 const document={{getElementById(id){{return id==='messages'?el:null;}}}};
 const msgInner={{style:{{}},dataset:{{}}}};
-function $(id){{return id==='messages'?el:id==='msgInner'?msgInner:null;}}
+const emptyState={{style:{{display:''}}}};
+const turn={{
+  dataset:{{}},
+  setAttribute(){{}},
+  querySelectorAll(){{return [];}},
+}};
+const blocks={{querySelectorAll(){{return [];}}}};
+function $(id){{
+  if(id==='messages') return el;
+  if(id==='msgInner') return msgInner;
+  if(id==='emptyState') return emptyState;
+  if(id==='liveAssistantTurn') return turn;
+  return null;
+}}
 function _captureMessageViewportAnchor(){{return null;}}
 function _shouldFollowMessagesOnDomReplace(){{return true;}}
 function _deferClearProgrammaticScroll(){{}}
@@ -159,21 +172,30 @@ function _isTouchLikeMessageViewport(){{return false;}}
 function _recentMessageScrollIntent(){{return false;}}
 function _recentMessageTouchScrollIntent(){{return false;}}
 function _restoreMessageScrollSnapshotSameFrameFallback(){{}}
-function requestAnimationFrame(callback){{callbacks.push(()=>{{delayedSnapshotPinned=snapshot.pinned===true; callback();}});}}
-const snapshot=_captureMessageScrollSnapshot();
-const capturedPinned=snapshot.pinned===true;
-const scrollRebuildGuard=_prepareLiveAnchorScrollRebuildGuard(snapshot);
-_restoreMessageScrollSnapshotSameFrame(snapshot);
+function requestAnimationFrame(callback){{callbacks.push(callback);}}
+function chatActivityMode(){{return 'compact_worklog';}}
+function isSimplifiedToolCalling(){{return true;}}
+const S={{session:{{session_id:'sid-1',pending_started_at:1}},activeStreamId:'stream-1'}};
+function _anchorSceneRowsForRendering(){{return [];}}
+function _assistantTurnBlocks(){{return blocks;}}
+function _captureWorklogDetailDisclosureState(){{return null;}}
+function _anchorSceneWorklogGroup(){{return {{}};}}
+function _renderAnchorSceneRowsIntoWorklog(){{return true;}}
+function _restoreWorklogDetailDisclosureState(){{}}
+function _startActivityElapsedTimer(){{}}
+function _dedupeLiveProcessedWorklogAnchors(){{}}
+function _moveLiveRunStatusToTurnEnd(){{}}
+function scrollIfPinned(){{}}
+const rendered=renderLiveAnchorActivityScene('stream-1',{{activity_rows:[]}},{{sessionId:'sid-1'}});
 const initialWrites=writes.slice();
 writes=[];
-_restoreLiveAnchorScrollSnapshotAfterRebuild(snapshot,scrollRebuildGuard);
 const guardQueued=callbacks.length>0;
 recordWrites=false;
 _recordNonMessageScrollIntent({{target:el,deltaY:{target_delta}}});
 el.scrollTop={final_top};
 recordWrites=true;
 callbacks.shift()();
-console.log(JSON.stringify({{capturedPinned,guardQueued,delayedSnapshotPinned,initialWrites,writes, finalScrollTop:el.scrollTop,
+console.log(JSON.stringify({{rendered,guardQueued,initialWrites,writes, finalScrollTop:el.scrollTop,
   messageUserUnpinned:_messageUserUnpinned, scrollPinned:_scrollPinned,
   generation:_messageScrollInputGeneration}}));
 """
@@ -183,9 +205,8 @@ def test_live_render_queue_preserves_real_upward_input_from_pinned_capture():
     """The real producer and queued live-render callback preserve upward input."""
     result = json.loads(_run_node(_live_render_ownership_harness(move_to_bottom=False)))
     assert result == {
-        "capturedPinned": True,
+        "rendered": True,
         "guardQueued": True,
-        "delayedSnapshotPinned": True,
         "initialWrites": [90026],
         "writes": [],
         "finalScrollTop": 89000,
@@ -199,9 +220,8 @@ def test_live_render_queue_repins_real_downward_input_at_bottom():
     """The real producer and queued live-render callback re-pin at true bottom."""
     result = json.loads(_run_node(_live_render_ownership_harness(move_to_bottom=True)))
     assert result == {
-        "capturedPinned": False,
+        "rendered": True,
         "guardQueued": True,
-        "delayedSnapshotPinned": False,
         "initialWrites": [89577],
         "writes": [],
         "finalScrollTop": 90026,
