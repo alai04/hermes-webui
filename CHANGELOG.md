@@ -383,6 +383,12 @@
 
 - **Added regression coverage for messaging clear-watermark semantics.** New test locks the watermark behavior so a future change can't silently regress it. Thanks @rodboev. (#5589, #5572)
 
+## [exp-v0.52.157] — 2026-07-29 — Experimental release (reconnect transcript ordering)
+
+### Fixed
+
+- **On SSE reconnect / mobile background-resume, the in-flight user prompt now stays above the live assistant worklog instead of jumping below it.** Both recovery paths (`loadSession` reattach and `refreshSession` soft-recovery, the iOS PWA background→resume path) now route the synthesized pending user message through one shared, identity-aware merge helper that inserts it immediately before the live assistant turn it started (and repairs the row in place if a prior render pushed it below). The helper is idempotent — a repeated recovery won't duplicate the prompt — and preserves legitimate repeated user turns. Thanks @nankingjing. (#6419, #6457)
+
 ## [exp-v0.52.156] — 2026-07-29 — Experimental release (hard-refresh session restore)
 
 ### Fixed
