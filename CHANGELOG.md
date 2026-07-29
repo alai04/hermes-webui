@@ -383,6 +383,12 @@
 
 - **Added regression coverage for messaging clear-watermark semantics.** New test locks the watermark behavior so a future change can't silently regress it. Thanks @rodboev. (#5589, #5572)
 
+## [exp-v0.52.156] — 2026-07-29 — Experimental release (hard-refresh session restore)
+
+### Fixed
+
+- **A hard refresh (or PWA relaunch) no longer loads the wrong chat when a stale `action=new-chat` launch parameter lingers in the URL.** An explicit `/session/<id>` (or `?session=`) target now always wins over a one-shot PWA new-chat launch action, the launch action is fully consumed via `history.replaceState` so Back + reload can't spawn a second empty chat, and only the exact `action=new-chat` pair is stripped from the restored URL (other query params, duplicate action values, and the hash are preserved). Thanks @ruizanthony. (#6507)
+
 ## [v0.52.106] — 2026-07-29
 
 ### Changed
