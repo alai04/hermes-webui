@@ -6104,7 +6104,7 @@ if(typeof window!=='undefined'){
         if(nearBottom){
           _nearBottomCount=_nearBottomCount+1;
           if(_nearBottomCount>=2){_scrollPinned=true;_nearBottomCount=0;}
-        }else if(!movedUp && _autoScrollFollow && _scrollPinned){
+        }else if(!movedUp && (typeof _autoScrollFollow==='undefined'||_autoScrollFollow) && _scrollPinned){
           // Content-grew-beneath-a-pinned-viewport case (NOT a user scroll-away).
           // During streaming on a tall transcript (esp. mobile, where chunks land
           // fast), new content increases scrollHeight under a stationary viewport,
@@ -6779,7 +6779,7 @@ function _shouldFollowMessagesOnDomReplace(){
   // following only for users who are still pinned or effectively at the tail.
   // A broad near-bottom window causes long answers/mobile readers who scroll up
   // a little to read mid-stream to get snapped back to the bottom on completion.
-  return _autoScrollFollow && !_messageUserUnpinned && (_scrollPinned || _isMessagePaneNearBottom(120));
+  return (typeof _autoScrollFollow==='undefined'||_autoScrollFollow) && !_messageUserUnpinned && (_scrollPinned || _isMessagePaneNearBottom(120));
 }
 function _followMessagesAfterDomReplace(){
   if(_shouldFollowMessagesOnDomReplace()){
