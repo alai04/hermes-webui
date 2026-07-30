@@ -20661,7 +20661,9 @@ def _handle_memory_read(handler, parsed=None):
         mem_dir = home / "memories"
 
     # Respect memory_enabled and user_profile_enabled config flags (#6406)
-    cfg = get_config()
+    # Use get_config_snapshot() for per-profile isolation — get_config() returns
+    # the process-global mutable _cfg_cache which races across profiles.
+    cfg = get_config_snapshot()
     memory_enabled = _webui_truthy(cfg.get("memory_enabled", True)) if isinstance(cfg, dict) else True
     user_profile_enabled = _webui_truthy(cfg.get("user_profile_enabled", True)) if isinstance(cfg, dict) else True
 
@@ -25763,7 +25765,9 @@ def _handle_memory_write(handler, body):
     section = body["section"]
 
     # Respect memory_enabled and user_profile_enabled config flags (#6406)
-    cfg = get_config()
+    # Use get_config_snapshot() for per-profile isolation — get_config() returns
+    # the process-global mutable _cfg_cache which races across profiles.
+    cfg = get_config_snapshot()
     if section == "memory":
         memory_enabled = _webui_truthy(cfg.get("memory_enabled", True)) if isinstance(cfg, dict) else True
         if not memory_enabled:
