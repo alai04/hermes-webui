@@ -473,9 +473,12 @@ def test_agent_status_callback_emits_compressing_and_warning_events():
 
 def test_agent_compression_start_status_matches_real_emitters_only():
     # Real start notices from hermes-agent emitters
-    # Preflight compression is excluded — it fires on every new session
-    # where the system prompt alone exceeds the threshold, producing a
-    # false "Compressing context" card before any model output.
+    # Preflight compression is intentionally excluded — the later
+        # authoritative ``Compacting context`` marker from
+        # conversation_compression is the signal that compression
+        # actually proceeded, and the preflight status can fire even
+        # when compression exits before compaction (e.g. durable
+        # guard refresh, Codex-Hermes mode with no active thread).
     assert not _is_agent_compression_start_status(
         "lifecycle",
         "📦 Preflight compression: ~101,000 tokens >= 96,000 threshold. This may take a moment.",
