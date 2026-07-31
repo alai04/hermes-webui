@@ -38,6 +38,8 @@ _discovery_cache: dict[str, tuple[float, dict[str, Any]]] = {}
 _jwks_lock = threading.Lock()
 _jwks_cache: dict[str, tuple[float, dict[str, Any]]] = {}
 
+_warned_allow_values: set[str] = set()
+
 
 class _NoRedirect(urllib.request.HTTPRedirectHandler):
     def redirect_request(self, *args, **kwargs):
@@ -166,9 +168,24 @@ def _resolve_oidc_config() -> dict[str, Any]:
         return env_value if env_value is not None else raw.get(name)
 
     scopes = _normalize_scopes(pick("scopes", "HERMES_WEBUI_OIDC_SCOPES"))
-    allow_values = _normalize_allow_values(
-        pick("allow_values", "HERMES_WEBUI_OIDC_ALLOW_VALUES")
-    )
+    raw_allow = pick("allow_values", "HERMES_WEBUI_OIDC_ALLOW_VALUES")
+    allow_values = _normalize_allow_values(raw_allow)
+    if (
+        raw_allow is not None
+        and not isinstance(raw_allow, (list, tuple, set))
+        and "," not in str(raw_allow)
+        and "\n" not in str(raw_allow)
+        and " " in str(raw_allow).strip()
+    ):
+        key = str(raw_allow)
+        if key not in _warned_allow_values:
+            _warned_allow_values.add(key)
+            logger.warning(
+                "HERMES_WEBUI_OIDC_ALLOW_VALUES contains spaces but no commas or newlines; "
+                "whitespace is no longer a value separator. "
+                "Use a comma-delimited scalar (e.g. \"value1,value2\") or a YAML array. "
+                "If this value is one multi-word group name, it is already correct and needs no action."
+            )
     return {
         "issuer": str(pick("issuer", "HERMES_WEBUI_OIDC_ISSUER") or "").strip(),
         "client_id": str(pick("client_id", "HERMES_WEBUI_OIDC_CLIENT_ID") or "").strip(),

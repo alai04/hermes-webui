@@ -1,0 +1,302 @@
+"""Tests for #6603 — ambiguous legacy OIDC allowlist scalar warning.
+
+Scope: _resolve_oidc_config warning detection and _enforce_allowlist decisions.
+No whitespace splitting under any heuristic; the warning is diagnostic only.
+"""
+import logging
+import sys
+from pathlib import Path
+from unittest.mock import patch
+
+sys.path.insert(0, str(Path(__file__).resolve().parent.parent))
+
+import pytest
+
+import api.auth_oidc as auth_oidc
+from api.auth_oidc import _enforce_allowlist, _normalize_allow_values, OIDCAuthError
+
+
+@pytest.fixture(autouse=True)
+def _reset_warned_cache():
+    auth_oidc._warned_allow_values.clear()
+    yield
+    auth_oidc._warned_allow_values.clear()
+
+
+def _resolve(monkeypatch, *, env=None, cfg_list=None):
+    """Call _resolve_oidc_config with controlled allow_values input.
+
+    Pass env= for a string env-var value, cfg_list= for a list from config.
+    Pass neither to simulate absent/None.
+    """
+    monkeypatch.delenv("HERMES_WEBUI_OIDC_ALLOW_VALUES", raising=False)
+    if env is not None:
+        monkeypatch.setenv("HERMES_WEBUI_OIDC_ALLOW_VALUES", env)
+        webui_cfg = {}
+    elif cfg_list is not None:
+        webui_cfg = {"allow_values": cfg_list}
+    else:
+        webui_cfg = {}
+    with patch("api.auth_oidc.get_config", return_value={"webui_oidc": webui_cfg}):
+        return auth_oidc._resolve_oidc_config()
+
+
+# ---------------------------------------------------------------------------
+# reproduction — base-fails / head-passes
+# ---------------------------------------------------------------------------
+
+def test_legacy_scalar_warns(monkeypatch, caplog):
+    """Exact scalar from #6603 issue emits a warning naming the setting and forms."""
+    with caplog.at_level(logging.WARNING, logger="api.auth_oidc"):
+        cfg = _resolve(monkeypatch, env="alice@example.com bob@example.com")
+
+    # head: warning names the setting
+    assert any(
+        "HERMES_WEBUI_OIDC_ALLOW_VALUES" in r.message for r in caplog.records
+    ), "expected warning naming HERMES_WEBUI_OIDC_ALLOW_VALUES"
+
+    # head: warning names both accepted forms
+    warning_text = " ".join(r.message for r in caplog.records)
+    assert "comma" in warning_text.lower(), "warning must mention comma-delimited form"
+    assert "yaml array" in warning_text.lower() or "yaml" in warning_text.lower(), (
+        "warning must mention YAML array form"
+    )
+
+    # head: allowlist unchanged — one combined value, claim still denied
+    assert cfg["allow_values"] == ["alice@example.com bob@example.com"]
+    with pytest.raises(OIDCAuthError):
+        _enforce_allowlist(
+            {"email": "alice@example.com"},
+            allow_claim="email",
+            allow_values=cfg["allow_values"],
+        )
+
+
+# ---------------------------------------------------------------------------
+# authorization unchanged — differential
+# ---------------------------------------------------------------------------
+
+def test_enforce_decisions_unchanged(monkeypatch):
+    """_enforce_allowlist allow/deny decisions are identical to origin/master behavior."""
+    # no allow_claim → always passes
+    _enforce_allowlist({"email": "anyone"}, allow_claim="", allow_values=[])
+
+    # matching value → allowed
+    _enforce_allowlist(
+        {"email": "alice@example.com"},
+        allow_claim="email",
+        allow_values=["alice@example.com", "bob@example.com"],
+    )
+
+    # non-matching value → denied
+    with pytest.raises(OIDCAuthError):
+        _enforce_allowlist(
+            {"email": "eve@example.com"},
+            allow_claim="email",
+            allow_values=["alice@example.com", "bob@example.com"],
+        )
+
+    # absent claim → denied
+    with pytest.raises(OIDCAuthError):
+        _enforce_allowlist(
+            {"sub": "1234"},
+            allow_claim="email",
+            allow_values=["alice@example.com"],
+        )
+
+    # allow_claim set, allow_values empty → any non-empty claim value passes
+    _enforce_allowlist(
+        {"email": "anyone@example.com"},
+        allow_claim="email",
+        allow_values=[],
+    )
+
+    # whitespace scalar resolves to one combined value; partial claim denied
+    combined_values = _normalize_allow_values("alice@example.com bob@example.com")
+    assert combined_values == ["alice@example.com bob@example.com"]
+    with pytest.raises(OIDCAuthError):
+        _enforce_allowlist(
+            {"email": "alice@example.com"},
+            allow_claim="email",
+            allow_values=combined_values,
+        )
+
+
+# ---------------------------------------------------------------------------
+# multi-word group preserved — issue requirement 5a
+# ---------------------------------------------------------------------------
+
+def test_multi_word_group(monkeypatch, caplog):
+    """'Hermes Users' stays one allow_values entry; a 'Hermes' fragment is denied."""
+    with caplog.at_level(logging.WARNING, logger="api.auth_oidc"):
+        cfg = _resolve(monkeypatch, env="Hermes Users")
+
+    # normalization preserves the full group name as one value
+    assert cfg["allow_values"] == ["Hermes Users"]
+
+    # full group name → allowed
+    _enforce_allowlist(
+        {"groups": "Hermes Users"},
+        allow_claim="groups",
+        allow_values=cfg["allow_values"],
+    )
+
+    # fragment → denied
+    with pytest.raises(OIDCAuthError):
+        _enforce_allowlist(
+            {"groups": "Hermes"},
+            allow_claim="groups",
+            allow_values=cfg["allow_values"],
+        )
+
+    # warning emitted (operator should confirm intent)
+    assert any("HERMES_WEBUI_OIDC_ALLOW_VALUES" in r.message for r in caplog.records)
+
+
+# ---------------------------------------------------------------------------
+# no fragment authorization — issue requirement 4
+# ---------------------------------------------------------------------------
+
+def test_no_fragment_authorized(monkeypatch):
+    """Team@Corp Admin@Corp as one value; Admin@Corp claim is denied."""
+    combined = _normalize_allow_values("Team@Corp Admin@Corp")
+    assert combined == ["Team@Corp Admin@Corp"]
+
+    # single-string claim
+    with pytest.raises(OIDCAuthError):
+        _enforce_allowlist(
+            {"groups": "Admin@Corp"},
+            allow_claim="groups",
+            allow_values=combined,
+        )
+
+    # array claim (simulates groups claim as list, matching _claim_values behavior)
+    with pytest.raises(OIDCAuthError):
+        _enforce_allowlist(
+            {"groups": ["Admin@Corp"]},
+            allow_claim="groups",
+            allow_values=combined,
+        )
+
+    # exact combined value is the only thing that passes
+    _enforce_allowlist(
+        {"groups": "Team@Corp Admin@Corp"},
+        allow_claim="groups",
+        allow_values=combined,
+    )
+
+
+# ---------------------------------------------------------------------------
+# canonical forms silent — negative space
+# ---------------------------------------------------------------------------
+
+def test_canonical_no_warning(monkeypatch, caplog):
+    """Comma, newline, and list configurations emit no warning."""
+    with caplog.at_level(logging.WARNING, logger="api.auth_oidc"):
+        # comma-delimited scalar
+        cfg = _resolve(monkeypatch, env="alice@example.com,bob@example.com")
+        assert cfg["allow_values"] == ["alice@example.com", "bob@example.com"]
+        assert not any("HERMES_WEBUI_OIDC_ALLOW_VALUES" in r.message for r in caplog.records), (
+            "comma scalar must not emit a warning"
+        )
+
+        caplog.clear()
+
+        # newline-delimited scalar
+        cfg = _resolve(monkeypatch, env="alice@example.com\nbob@example.com")
+        assert cfg["allow_values"] == ["alice@example.com", "bob@example.com"]
+        assert not any("HERMES_WEBUI_OIDC_ALLOW_VALUES" in r.message for r in caplog.records), (
+            "newline scalar must not emit a warning"
+        )
+
+        caplog.clear()
+
+        # YAML array (list from config)
+        cfg = _resolve(monkeypatch, cfg_list=["alice@example.com", "bob@example.com"])
+        assert cfg["allow_values"] == ["alice@example.com", "bob@example.com"]
+        assert not any("HERMES_WEBUI_OIDC_ALLOW_VALUES" in r.message for r in caplog.records), (
+            "list/array config must not emit a warning"
+        )
+
+        caplog.clear()
+
+        # single token with no inner space
+        cfg = _resolve(monkeypatch, env="alice@example.com")
+        assert cfg["allow_values"] == ["alice@example.com"]
+        assert not any("HERMES_WEBUI_OIDC_ALLOW_VALUES" in r.message for r in caplog.records), (
+            "single token without spaces must not emit a warning"
+        )
+
+        caplog.clear()
+
+        # absent
+        cfg = _resolve(monkeypatch)
+        assert cfg["allow_values"] == []
+        assert not any("HERMES_WEBUI_OIDC_ALLOW_VALUES" in r.message for r in caplog.records), (
+            "absent value must not emit a warning"
+        )
+
+
+# ---------------------------------------------------------------------------
+# mode/state matrix — one case per Fault Scope matrix row
+# ---------------------------------------------------------------------------
+
+def test_allow_values_matrix(monkeypatch, caplog):
+    """Every configured shape resolves to its declared allowlist and warning state."""
+    with caplog.at_level(logging.WARNING, logger="api.auth_oidc"):
+        # row 1: whitespace-only scalar, multiple intended values → one combined, warning
+        cfg = _resolve(monkeypatch, env="alice@example.com bob@example.com")
+        assert cfg["allow_values"] == ["alice@example.com bob@example.com"]
+        assert any("HERMES_WEBUI_OIDC_ALLOW_VALUES" in r.message for r in caplog.records)
+        caplog.clear()
+        auth_oidc._warned_allow_values.clear()
+
+        # row 2: whitespace-only scalar, one intended multi-word group → one value, warning
+        cfg = _resolve(monkeypatch, env="Hermes Users")
+        assert cfg["allow_values"] == ["Hermes Users"]
+        assert any("HERMES_WEBUI_OIDC_ALLOW_VALUES" in r.message for r in caplog.records)
+        caplog.clear()
+        auth_oidc._warned_allow_values.clear()
+
+        # row 3: comma scalar → split values, no warning
+        cfg = _resolve(monkeypatch, env="alice@example.com,bob@example.com")
+        assert cfg["allow_values"] == ["alice@example.com", "bob@example.com"]
+        assert not caplog.records
+        caplog.clear()
+
+        # row 4: newline scalar → split values, no warning
+        cfg = _resolve(monkeypatch, env="alice@example.com\nbob@example.com")
+        assert cfg["allow_values"] == ["alice@example.com", "bob@example.com"]
+        assert not caplog.records
+        caplog.clear()
+
+        # row 5: list/YAML array → each element, no warning
+        cfg = _resolve(monkeypatch, cfg_list=["alice@example.com", "bob@example.com"])
+        assert cfg["allow_values"] == ["alice@example.com", "bob@example.com"]
+        assert not caplog.records
+        caplog.clear()
+
+        # row 6: empty/absent → empty allowlist, no warning
+        cfg = _resolve(monkeypatch)
+        assert cfg["allow_values"] == []
+        assert not caplog.records
+
+
+# ---------------------------------------------------------------------------
+# warning emitted once — not per request
+# ---------------------------------------------------------------------------
+
+def test_warning_not_per_request(monkeypatch, caplog):
+    """Repeated config resolution with the same whitespace scalar emits the warning once."""
+    with caplog.at_level(logging.WARNING, logger="api.auth_oidc"):
+        _resolve(monkeypatch, env="alice@example.com bob@example.com")
+        _resolve(monkeypatch, env="alice@example.com bob@example.com")
+        _resolve(monkeypatch, env="alice@example.com bob@example.com")
+
+    matching = [
+        r for r in caplog.records
+        if "HERMES_WEBUI_OIDC_ALLOW_VALUES" in r.message
+    ]
+    assert len(matching) == 1, (
+        f"expected exactly 1 warning, got {len(matching)}"
+    )
