@@ -763,6 +763,52 @@ class TestNonEmptyMessagesPendingCleared:
         assert "partial output above was recovered" in error_msgs[0]["content"]
         assert "no agent output was recovered" not in error_msgs[0]["content"]
 
+    def test_gateway_terminal_error_transcript_survives_unsaved_recovery(
+        self, hermes_home, monkeypatch,
+    ):
+        """An unsaved gateway terminal error must recover its specific error,
+        rather than replacing it with the generic restart marker."""
+        s = _make_session(messages=[{"role": "user", "content": "existing turn"}])
+        s.pending_user_message = "Gateway request"
+        s.pending_started_at = time.time() - 120
+        s.active_stream_id = "gateway_terminal_error_stream"
+        s.save()
+
+        terminal_message = {
+            "role": "assistant",
+            "content": "**Gateway error:** gateway exploded",
+            "timestamp": int(time.time()),
+            "_error": True,
+        }
+        append_run_event(
+            s.session_id,
+            s.active_stream_id,
+            "apperror",
+            {
+                "session_id": s.session_id,
+                "terminal_session_persisted": False,
+                "session": {
+                    "session_id": s.session_id,
+                    "messages": [
+                        {"role": "user", "content": "Gateway request"},
+                        terminal_message,
+                    ],
+                },
+            },
+        )
+
+        core_path = hermes_home / "sessions" / f"session_{s.session_id}.json"
+        result = _apply_core_sync_or_error_marker(
+            s,
+            core_path,
+            stream_id_for_recheck=s.active_stream_id,
+        )
+
+        assert result is True
+        error_msgs = [m for m in s.messages if m.get("_error")]
+        assert [m["content"] for m in error_msgs] == [terminal_message["content"]]
+        assert all("Response interrupted" not in m["content"] for m in error_msgs)
+
     def test_journal_recovery_restores_reasoning_only_as_display_metadata(
         self, hermes_home, monkeypatch,
     ):

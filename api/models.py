@@ -2490,6 +2490,77 @@ def _run_journal_terminal_state(session, stream_id: str | None) -> str | None:
     return str(summary.get('terminal_state') or '') or None
 
 
+def _materialize_unsaved_gateway_terminal_error(session, stream_id: str | None) -> bool:
+    """Recover a gateway terminal error whose session save was not durable.
+
+    Gateway terminal-error events carry the redacted in-memory transcript so a
+    failed sidecar save does not turn a specific provider error into a generic
+    restart marker.  Only an exact persisted-session match is authoritative;
+    every other marker state is treated as non-durable and requires the
+    embedded terminal error to be validated and materialized locally.
+    """
+    if not stream_id:
+        return False
+    try:
+        from api.run_journal import read_run_events
+        journal = read_run_events(session.session_id, stream_id)
+    except Exception:
+        logger.debug(
+            "Session %s: failed to read terminal error journal for stream %s",
+            getattr(session, 'session_id', '?'),
+            stream_id,
+            exc_info=True,
+        )
+        return False
+
+    for event in journal.get('events') or []:
+        if not isinstance(event, dict) or event.get('event') != 'apperror':
+            continue
+        payload = event.get('payload')
+        if not isinstance(payload, dict):
+            continue
+        embedded_session = payload.get('session')
+        if not isinstance(embedded_session, dict):
+            continue
+        payload_session_id = payload.get('session_id')
+        embedded_session_id = embedded_session.get('session_id')
+        if payload_session_id is not None and str(payload_session_id) != session.session_id:
+            continue
+        if embedded_session_id is not None and str(embedded_session_id) != session.session_id:
+            continue
+        persisted_id = payload.get('terminal_session_persisted_session_id')
+        if (
+            payload.get('terminal_session_persisted') is True
+            and str(persisted_id or '') == session.session_id
+        ):
+            return False
+        embedded_messages = embedded_session.get('messages')
+        if not isinstance(embedded_messages, list):
+            continue
+        for candidate in embedded_messages:
+            if not isinstance(candidate, dict) or candidate.get('role') != 'assistant':
+                continue
+            if candidate.get('_error') is not True:
+                continue
+            content = candidate.get('content')
+            if not isinstance(content, str) or not content.strip():
+                continue
+            if any(
+                isinstance(existing, dict)
+                and existing.get('role') == 'assistant'
+                and existing.get('_error') is True
+                and existing.get('content') == content
+                for existing in session.messages or []
+            ):
+                return True
+            recovered = dict(candidate)
+            recovered['_recovered_from_run_journal'] = True
+            recovered['_recovered_stream_id'] = stream_id
+            session.messages.append(recovered)
+            return True
+    return False
+
+
 def _journal_is_still_arriving(session, stream_id: str | None) -> bool:
     """Return True for journals that may become visible on a later read.
 
@@ -3189,6 +3260,9 @@ def _apply_core_sync_or_error_marker(
             if session.pending_attachments:
                 recovered['attachments'] = list(session.pending_attachments)
             _append_recovered_turn_to_context(session, recovered)
+        terminal_error_recovered = _materialize_unsaved_gateway_terminal_error(
+            session, _stream_id,
+        )
         recovered_output = _append_journaled_partial_output(
             session,
             _stream_id,
@@ -3198,13 +3272,14 @@ def _apply_core_sync_or_error_marker(
         session.pending_attachments = []
         session.pending_started_at = None
         session.pending_user_source = None
-        session.messages.append(
-            _build_recovery_marker_with_retry_hook(
-                recovered_output=recovered_output,
-                stream_id=_stream_id,
-                pending_started_at=_pending_started_at,
+        if not terminal_error_recovered:
+            session.messages.append(
+                _build_recovery_marker_with_retry_hook(
+                    recovered_output=recovered_output,
+                    stream_id=_stream_id,
+                    pending_started_at=_pending_started_at,
+                )
             )
-        )
         session.save(touch_updated_at=touch_updated_at)
         logger.info(
             "Session %s: recovered pending user turn (messages non-empty), added error marker",
@@ -3246,6 +3321,9 @@ def _apply_core_sync_or_error_marker(
                 and _run_journal_has_visible_output(session, _stream_id)
             ):
                 _append_recovered_pending_turn(session, timestamp=_recovered_ts)
+            terminal_error_recovered = _materialize_unsaved_gateway_terminal_error(
+                session, _stream_id,
+            )
             recovered_output = _append_journaled_partial_output(
                 session,
                 _stream_id,
@@ -3257,7 +3335,7 @@ def _apply_core_sync_or_error_marker(
             session.pending_attachments = []
             session.pending_started_at = None
             session.pending_user_source = None
-            if recovered_output:
+            if recovered_output and not terminal_error_recovered:
                 session.messages.append(
                     _interrupted_recovery_marker(
                         recovered_output=True,
@@ -3294,6 +3372,9 @@ def _apply_core_sync_or_error_marker(
         if isinstance(session.pending_started_at, (int, float)) and session.pending_started_at > 0:
             _recovered_ts = int(session.pending_started_at)
         _append_recovered_pending_turn(session, timestamp=_recovered_ts)
+    terminal_error_recovered = _materialize_unsaved_gateway_terminal_error(
+        session, stream_id_for_recheck or session.active_stream_id,
+    )
     recovered_output = _append_journaled_partial_output(
         session,
         stream_id_for_recheck or session.active_stream_id,
@@ -3305,13 +3386,14 @@ def _apply_core_sync_or_error_marker(
     session.pending_attachments = []
     session.pending_started_at = None
     session.pending_user_source = None
-    session.messages.append(
-        _build_recovery_marker_with_retry_hook(
-            recovered_output=recovered_output,
-            stream_id=_stream_id,
-            pending_started_at=_pending_started_at,
+    if not terminal_error_recovered:
+        session.messages.append(
+            _build_recovery_marker_with_retry_hook(
+                recovered_output=recovered_output,
+                stream_id=_stream_id,
+                pending_started_at=_pending_started_at,
+            )
         )
-    )
     session.save(touch_updated_at=touch_updated_at)
     logger.info("Session %s: no core transcript found, added error marker", sid)
     return True
