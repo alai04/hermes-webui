@@ -3,9 +3,12 @@
 Scope: _resolve_oidc_config warning detection and _enforce_allowlist decisions.
 No whitespace splitting under any heuristic; the warning is diagnostic only.
 """
+import importlib.util
 import logging
+import os
 import sys
 from pathlib import Path
+from typing import Any
 from unittest.mock import patch
 
 sys.path.insert(0, str(Path(__file__).resolve().parent.parent))
@@ -15,12 +18,30 @@ import pytest
 import api.auth_oidc as auth_oidc
 from api.auth_oidc import _enforce_allowlist, _normalize_allow_values, OIDCAuthError
 
+_BASE_WORKTREE = r"D:\Repos\.claude\pr-sweep\base-worktrees\webui-6645-4085-before-320789ae"
+
 
 @pytest.fixture(autouse=True)
 def _reset_warned_cache():
     auth_oidc._warned_allow_values.clear()
     yield
     auth_oidc._warned_allow_values.clear()
+
+
+@pytest.fixture(scope="module")
+def base_normalize_allow_values():
+    """Load _normalize_allow_values from the base worktree for differential comparison."""
+    base_path = os.path.join(_BASE_WORKTREE, "api", "auth_oidc.py")
+    spec = importlib.util.spec_from_file_location("auth_oidc_base", base_path)
+    mod = importlib.util.module_from_spec(spec)
+    # Inject dependencies that are already loaded; _normalize_allow_values is pure.
+    sys.path.insert(0, _BASE_WORKTREE)
+    try:
+        spec.loader.exec_module(mod)
+    finally:
+        if _BASE_WORKTREE in sys.path:
+            sys.path.remove(_BASE_WORKTREE)
+    return mod._normalize_allow_values
 
 
 def _resolve(monkeypatch, *, env=None, cfg_list=None):
@@ -220,11 +241,29 @@ def test_canonical_no_warning(monkeypatch, caplog):
 
         caplog.clear()
 
-        # single token with no inner space
+        # single token with no inner whitespace
         cfg = _resolve(monkeypatch, env="alice@example.com")
         assert cfg["allow_values"] == ["alice@example.com"]
         assert not any("HERMES_WEBUI_OIDC_ALLOW_VALUES" in r.message for r in caplog.records), (
-            "single token without spaces must not emit a warning"
+            "single token without inner whitespace must not emit a warning"
+        )
+
+        caplog.clear()
+
+        # single token with only leading/trailing whitespace (strip removes it, no inner ws)
+        cfg = _resolve(monkeypatch, env="  alice@example.com  ")
+        assert cfg["allow_values"] == ["alice@example.com"]
+        assert not any("HERMES_WEBUI_OIDC_ALLOW_VALUES" in r.message for r in caplog.records), (
+            "leading/trailing-only whitespace must not emit a warning"
+        )
+
+        caplog.clear()
+
+        # leading/trailing tab only
+        cfg = _resolve(monkeypatch, env="\talice@example.com\t")
+        assert cfg["allow_values"] == ["alice@example.com"]
+        assert not any("HERMES_WEBUI_OIDC_ALLOW_VALUES" in r.message for r in caplog.records), (
+            "leading/trailing-only tab must not emit a warning"
         )
 
         caplog.clear()
@@ -300,3 +339,95 @@ def test_warning_not_per_request(monkeypatch, caplog):
     assert len(matching) == 1, (
         f"expected exactly 1 warning, got {len(matching)}"
     )
+
+
+# ---------------------------------------------------------------------------
+# P1: Unicode whitespace — tab and NBSP separated scalars warn
+# ---------------------------------------------------------------------------
+
+def test_tab_separated_scalar_warns(monkeypatch, caplog):
+    """Tab-separated scalar emits the same warning as a space-separated one."""
+    with caplog.at_level(logging.WARNING, logger="api.auth_oidc"):
+        cfg = _resolve(monkeypatch, env="alice@example.com\tbob@example.com")
+
+    assert cfg["allow_values"] == ["alice@example.com\tbob@example.com"]
+    assert any("HERMES_WEBUI_OIDC_ALLOW_VALUES" in r.message for r in caplog.records), (
+        "tab-separated scalar must emit a warning"
+    )
+    # claim still denied
+    with pytest.raises(OIDCAuthError):
+        _enforce_allowlist(
+            {"email": "alice@example.com"},
+            allow_claim="email",
+            allow_values=cfg["allow_values"],
+        )
+
+
+def test_nbsp_separated_scalar_warns(monkeypatch, caplog):
+    """Non-breaking-space-separated scalar emits a warning."""
+    nbsp_val = "alice@example.com\u00a0bob@example.com"
+    with caplog.at_level(logging.WARNING, logger="api.auth_oidc"):
+        cfg = _resolve(monkeypatch, env=nbsp_val)
+
+    assert cfg["allow_values"] == [nbsp_val]
+    assert any("HERMES_WEBUI_OIDC_ALLOW_VALUES" in r.message for r in caplog.records), (
+        "NBSP-separated scalar must emit a warning"
+    )
+    with pytest.raises(OIDCAuthError):
+        _enforce_allowlist(
+            {"email": "alice@example.com"},
+            allow_claim="email",
+            allow_values=cfg["allow_values"],
+        )
+
+
+def test_leading_trailing_whitespace_only_no_warn(monkeypatch, caplog):
+    """Single token with only leading/trailing whitespace does not warn."""
+    with caplog.at_level(logging.WARNING, logger="api.auth_oidc"):
+        cfg = _resolve(monkeypatch, env="\t  alice@example.com  \t")
+
+    assert cfg["allow_values"] == ["alice@example.com"]
+    assert not any("HERMES_WEBUI_OIDC_ALLOW_VALUES" in r.message for r in caplog.records), (
+        "leading/trailing-only whitespace must not emit a warning"
+    )
+
+
+# ---------------------------------------------------------------------------
+# P2: unlisted-shape differential — head matches base for every input type
+# ---------------------------------------------------------------------------
+
+def test_normalize_allow_values_unlisted_shapes_match_base(base_normalize_allow_values):
+    """_normalize_allow_values output is identical to origin/master for unlisted shapes.
+
+    Shapes under test: None, bool, int, tuple, set, bare-CR scalar.
+    Uses the base worktree's implementation as the reference rather than asserting
+    constants, so the claim "for any input" is honest.
+    """
+    base = base_normalize_allow_values
+    head = _normalize_allow_values
+
+    shapes: list[Any] = [
+        None,
+        True,
+        False,
+        42,
+        3.14,
+        ("alice@example.com", "bob@example.com"),
+        {"alice@example.com", "bob@example.com"},
+        "alice\rbob",          # bare CR, no newline — stays combined
+        "",
+        "   ",
+    ]
+
+    for raw in shapes:
+        head_result = head(raw)
+        base_result = base(raw)
+        # Sets have undefined order; compare as sets of strings.
+        if isinstance(raw, set):
+            assert set(head_result) == set(base_result), (
+                f"set input {raw!r}: head={head_result} base={base_result}"
+            )
+        else:
+            assert head_result == base_result, (
+                f"input {raw!r}: head={head_result!r} base={base_result!r}"
+            )

@@ -175,7 +175,7 @@ def _resolve_oidc_config() -> dict[str, Any]:
         and not isinstance(raw_allow, (list, tuple, set))
         and "," not in str(raw_allow)
         and "\n" not in str(raw_allow)
-        and " " in str(raw_allow).strip()
+        and any(ch.isspace() for ch in str(raw_allow).strip())
     ):
         key = str(raw_allow)
         if key not in _warned_allow_values:
