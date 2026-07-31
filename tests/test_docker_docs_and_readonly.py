@@ -178,7 +178,7 @@ def test_docker_init_stages_agent_source_for_writable_install():
     invocation)."""
     src = (REPO / "docker_init.bash").read_text(encoding="utf-8")
 
-    # The fix uses a /tmp staging path that's clearly distinct from the
+    # The fix uses an /app staging path that's clearly distinct from the
     # mounted source path. Pin the staging marker.
     assert "_stage_src=" in src, (
         "docker_init.bash must declare a _stage_src writable build dir "
@@ -346,10 +346,12 @@ def test_docker_init_uses_editable_install():
 
 
 def test_docker_init_stages_to_persistent_path():
-    """The staged source must live under /app/ (persistent storage), not /tmp/
-    (ephemeral). An editable install records the staged path in a .pth file —
-    if the path is on tmpfs, a container restart or tmpfs flush breaks imports.
-    Placing it alongside the venv gives both the same lifecycle."""
+    """The staged source must share the venv's container-layer lifecycle.
+
+    An editable install records the staged path in a .pth file. Keeping that
+    target under /app/ alongside the venv avoids runtimes that mount or clean
+    /tmp independently while retaining /app/ across ordinary restarts.
+    """
     src = (REPO / "docker_init.bash").read_text(encoding="utf-8")
 
     stage_line = [
@@ -361,7 +363,7 @@ def test_docker_init_stages_to_persistent_path():
         assert "/tmp" not in line, (
             "docker_init.bash stages the editable source under /tmp/ which is "
             "ephemeral. The editable .pth link will dangle after tmpfs flush "
-            "or container recreation. Stage under /app/ for persistence. "
+            "or external cleanup. Stage under /app/ beside the venv. "
             f"Offending line: {line!r}"
         )
         assert "/app/" in line, (
