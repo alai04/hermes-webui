@@ -587,8 +587,7 @@ def _is_agent_compression_start_status(kind: str, message: str) -> bool:
     if 'compressed' in m and 'compressing' not in m and 'compression attempt' not in m:
         return False
     return (
-        'preflight compression:' in m
-        or 'pre-api compression:' in m
+        'pre-api compression:' in m
         or 'compacting context' in m
         or 'context too large' in m
         or '— compressing (' in m
