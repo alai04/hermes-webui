@@ -1285,7 +1285,7 @@ def _probe_dirty(path: Path, timeout: int = 1) -> bool | None:
     out, ok = _run_git(['diff-index', '--quiet', 'HEAD', '--'], path, timeout=timeout)
     if ok:
         return False
-    if not out or out.startswith('git exited with status '):
+    if out == 'git exited with status 1':
         return True
     logger.warning(
         'git dirty probe failed; treating working-tree state as unknown: %s',

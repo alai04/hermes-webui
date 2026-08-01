@@ -520,6 +520,48 @@ def test_force_update_dirty_probe_timeout_keeps_stable_no_ref_as_an_exact_noop(
     restart.assert_not_called()
 
 
+def test_force_update_dirty_probe_non_dirty_status_keeps_stable_no_ref_as_an_exact_noop(
+    tmp_path, monkeypatch, caplog,
+):
+    (tmp_path / '.git').mkdir()
+    calls = []
+
+    def fake_git(args, cwd, timeout=10):
+        calls.append((args, timeout))
+        if args == ['fetch', 'origin', '--quiet', '--tags', '--force']:
+            return '', True
+        if args == ['diff-index', '--quiet', 'HEAD', '--']:
+            return 'git exited with status 2', False
+        raise AssertionError(f'unexpected git args: {args!r}')
+
+    monkeypatch.setattr(updates, 'REPO_ROOT', tmp_path)
+    monkeypatch.setattr(
+        updates, '_restart_blocker_snapshot',
+        lambda: {'restart_blocked': False, 'active_streams': 0, 'active_runs': 0},
+    )
+    monkeypatch.setattr(updates, '_select_apply_compare_ref', lambda *args: None)
+    monkeypatch.setattr(updates, '_run_git', fake_git)
+    restart = MagicMock()
+    monkeypatch.setattr(updates, '_schedule_restart', restart)
+
+    with caplog.at_level(logging.WARNING, logger='api.updates'):
+        result = updates.apply_force_update('webui', channel='stable')
+
+    assert result == {
+        'ok': True,
+        'message': 'webui is already up to date on the stable channel.',
+        'target': 'webui',
+        'up_to_date': True,
+        'channel': 'stable',
+    }
+    assert calls == [
+        (['fetch', 'origin', '--quiet', '--tags', '--force'], 15),
+        (['diff-index', '--quiet', 'HEAD', '--'], updates._FORCE_DIRTY_PROBE_TIMEOUT),
+    ]
+    assert 'working-tree state as unknown' in caplog.text
+    restart.assert_not_called()
+
+
 def test_force_update_dirty_stable_reset_failure_reports_head(tmp_path, monkeypatch):
     (tmp_path / '.git').mkdir()
     calls = []
