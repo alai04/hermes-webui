@@ -560,7 +560,15 @@ def _is_profile_agnostic_foreign_session(cli_meta) -> bool:
         str(cli_meta.get("source_tag") or "").strip().lower(),
         str(cli_meta.get("raw_source") or "").strip().lower(),
     }
-    return CLAUDE_CODE_SOURCE in sources
+    # Profile-less external-agent rows that live outside the Hermes profile tree.
+    # Claude Code: scanned from ~/.claude/projects; Codex: scanned from ~/.codex/
+    profile_agnostic_sources = {CLAUDE_CODE_SOURCE}
+    try:
+        from api.codex_sessions import CODEX_SOURCE
+        profile_agnostic_sources.add(CODEX_SOURCE)
+    except ImportError:
+        pass
+    return bool(sources & profile_agnostic_sources)
 
 
 def _request_session_visibility_exempt(method: str, path: str | None) -> bool:
