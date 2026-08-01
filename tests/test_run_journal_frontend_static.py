@@ -24,6 +24,20 @@ def _function_body(src: str, signature: str) -> str:
     raise AssertionError(f"could not extract function body for {signature!r}")
 
 
+def _optional_function_body(src: str, signature: str) -> str:
+    """Extract a helper if present, else return "".
+
+    Used for helpers whose ABSENCE is itself the regression under test: the
+    probe must still run so the behavioral assertion reports the duplicate,
+    rather than dying with a substring-not-found extraction error that says
+    nothing about observable behavior.
+    """
+    try:
+        return _function_body(src, signature)
+    except (ValueError, AssertionError):
+        return ""
+
+
 def _run_session_identity_probe() -> dict:
     prompt = "same submitted prompt\nwith a second line"
     workspace_prompt = f"[Workspace::v1: /tmp/hermes-webui]\n{prompt}"
@@ -197,12 +211,15 @@ def _run_pending_session_message_probe() -> dict:
             _function_body(SESSIONS_SRC, "function _normalizeUserTranscriptText"),
             _function_body(SESSIONS_SRC, "function _sameTranscriptMessage"),
             _function_body(UI_SRC, "function _pendingCurrentTailUserMessage"),
+            _optional_function_body(UI_SRC, "function _messageTimestampSeconds"),
+            _optional_function_body(UI_SRC, "function _pendingActiveTurnUserMessage"),
             _function_body(UI_SRC, "function _isContextCompactionText"),
             _function_body(UI_SRC, "function _isContextCompactionMessage"),
             _function_body(UI_SRC, "function getPendingSessionMessage"),
         ]
     )
     script = f"""
+const _PENDING_ACTIVE_TURN_TS_TOLERANCE=1.5;
 {helpers}
 const prompt = {json.dumps(prompt)};
 const historical = {{role:'user', content:prompt, _ts:1}};
@@ -270,6 +287,50 @@ const repeatedCompletedPromptCount = repeatedCompletedMessages.filter(
 ).length;
 const compactionCurrentTail = _pendingCurrentTailUserMessage([historical, historicalAnswer, currentTailForCompaction, compactionMarker]);
 
+// Mid-run reload: the server already reconciled the active turn's user row into
+// the transcript AND this turn's assistant/tool output follows it, while
+// pending_user_message is still set. The strict tail scan cannot see the user
+// row (it stops at the completed assistant), so without the pending_started_at
+// fallback the prompt is materialized a second time -> duplicate user bubble.
+const midRunStartedAt = 500;
+const midRunTranscript = [
+  {{role:'user', content:'earlier question', timestamp:100}},
+  {{role:'assistant', content:'earlier answer', timestamp:200}},
+  {{role:'user', content:prompt, timestamp:midRunStartedAt}},
+  {{role:'assistant', content:'', timestamp:midRunStartedAt+15}},
+  {{role:'tool', content:'{{"ok":true}}', timestamp:midRunStartedAt+16}},
+  {{role:'assistant', content:'partial answer', timestamp:midRunStartedAt+60}},
+];
+const midRunResult = getPendingSessionMessage(
+  {{pending_user_message:prompt, pending_started_at:midRunStartedAt}},
+  midRunTranscript
+);
+const midRunWorkspaceTranscript = [
+  {{role:'user', content:'earlier question', timestamp:100}},
+  {{role:'assistant', content:'earlier answer', timestamp:200}},
+  {{role:'user', content:{json.dumps(current_workspace_prompt)}, timestamp:midRunStartedAt}},
+  {{role:'assistant', content:'partial answer', timestamp:midRunStartedAt+30}},
+];
+const midRunWorkspaceResult = getPendingSessionMessage(
+  {{pending_user_message:prompt, pending_started_at:midRunStartedAt}},
+  midRunWorkspaceTranscript
+);
+// A same-text row from an OLDER turn must never be adopted: only the row whose
+// timestamp matches pending_started_at identifies the active turn.
+const staleSameTextTranscript = [
+  {{role:'user', content:prompt, timestamp:midRunStartedAt-600}},
+  {{role:'assistant', content:'old answer', timestamp:midRunStartedAt-500}},
+];
+const staleSameTextResult = getPendingSessionMessage(
+  {{pending_user_message:prompt, pending_started_at:midRunStartedAt}},
+  staleSameTextTranscript
+);
+// Legacy/absent pending_started_at disables the fallback rather than guessing.
+const noStartedAtResult = getPendingSessionMessage(
+  {{pending_user_message:prompt}},
+  midRunTranscript
+);
+
 process.stdout.write(JSON.stringify({{
   historicalSameTextSurvives: !!fromHistoricalSameText && fromHistoricalSameText.content===prompt && fromHistoricalSameText._pending===true,
   historicalWorkspaceSurvives: !!fromHistoricalWorkspace && fromHistoricalWorkspace.content===prompt && fromHistoricalWorkspace._pending===true,
@@ -282,6 +343,10 @@ process.stdout.write(JSON.stringify({{
   compactionBoundaryCurrentTail: compactionCurrentTail&&compactionCurrentTail.role==='user'&&compactionCurrentTail.content===prompt,
   compactionCurrentTailAttachmentsCopied: Array.isArray(currentTailForCompaction.attachments) && currentTailForCompaction.attachments[0].name==='note.txt',
   repeatedCompletedPromptsRemainValid: repeatedCompletedPromptCount===3,
+  midRunReloadDedupe: midRunResult===null,
+  midRunWorkspaceReloadDedupe: midRunWorkspaceResult===null,
+  staleSameTextStillMaterializes: !!staleSameTextResult && staleSameTextResult._pending===true,
+  legacyNoStartedAtStillMaterializes: !!noStartedAtResult && noStartedAtResult._pending===true,
   isContextCompactionText: _isContextCompactionText(compactionMarker.content),
   isContextCompactionMessage: _isContextCompactionMessage(compactionMarker),
 }}));
@@ -496,6 +561,11 @@ def test_get_pending_session_message_keeps_deferred_repeat_prompt_by_behavior():
     assert result["compactionBoundaryCurrentTail"] is True
     assert result["compactionCurrentTailAttachmentsCopied"] is True
     assert result["repeatedCompletedPromptsRemainValid"] is True
+    # #6649 follow-up: mid-run reload must not duplicate the active turn's user row
+    assert result["midRunReloadDedupe"] is True
+    assert result["midRunWorkspaceReloadDedupe"] is True
+    assert result["staleSameTextStillMaterializes"] is True
+    assert result["legacyNoStartedAtStillMaterializes"] is True
     assert result["isContextCompactionText"] is True
     assert result["isContextCompactionMessage"] is True
 
