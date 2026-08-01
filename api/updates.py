@@ -431,21 +431,15 @@ def _dirty_suffix(path: Path, timeout=1) -> str:
     out, ok = _run_git(['diff-index', '--quiet', 'HEAD', '--'], path, timeout=timeout)
     if ok:
         return ""
-    # diff-index --quiet exits 1 with no stdout/stderr to *signal* a dirty tree
-    # (not an error). _run_git() substitutes a synthetic "git exited with
-    # status N" diagnostic when both streams are empty, which makes the naive
-    # `if not out` guard always false on dirty trees — silently dropping the
-    # suffix and defeating dev-build cache busting (static/foo.js?v=… stays
-    # identical to the last-committed version). Treat the synthetic shape as
-    # the dirty signal; real errors (timeouts, missing git) carry a different
-    # diagnostic and correctly suppress the suffix.
-    if not out or out.startswith('git exited with status '):
-        diff, diff_ok = _run_git(['diff', '--binary', 'HEAD', '--'], path, timeout=timeout)
-        if diff_ok and diff:
-            digest = hashlib.sha1(diff.encode('utf-8', errors='replace')).hexdigest()[:8]
-            return f"-dirty-{digest}"
-        return "-dirty"
-    return ""
+    # Only diff-index status 1 means dirty. Keep version display consistent
+    # with the strict action-time probe; all other failures suppress the suffix.
+    if out != 'git exited with status 1':
+        return ""
+    diff, diff_ok = _run_git(['diff', '--binary', 'HEAD', '--'], path, timeout=timeout)
+    if diff_ok and diff:
+        digest = hashlib.sha1(diff.encode('utf-8', errors='replace')).hexdigest()[:8]
+        return f"-dirty-{digest}"
+    return "-dirty"
 
 
 def _describe_git_version(path: Path, *, timeout=5, dirty_timeout=1) -> str | None:
@@ -1943,16 +1937,15 @@ def _discard_local_changes(path: Path, reset_ref: str) -> bool:
 
 
 def apply_force_update(target: str, channel=None) -> dict:
-    """Force-reset the target repo to the latest remote HEAD.
+    """Discard local changes for the requested update target.
 
     Unlike apply_update() which requires a clean working tree and refuses
     merge conflicts, this discards all local modifications (checkout .) and
-    resets to origin/<branch> — equivalent to what the diverged/conflict
-    error messages ask the user to run manually.
+    resets to the selected update ref. A dirty stable WebUI checkout with no
+    promoted ref resets to its symbolic HEAD so the commit itself is unchanged.
 
-    Should only be called when apply_update() has already returned a
-    response with ``conflict: True`` or ``diverged: True`` and the user
-    has confirmed they want to discard local changes.
+    The endpoint is called after the user has confirmed they want to discard
+    local changes, including the stable no-ref dirty-checkout recovery path.
 
     CHANNEL SAFETY (rewind guard): ``reset --hard`` is destructive. When the
     selected channel resolves to a ref that is an ANCESTOR of HEAD (i.e. the

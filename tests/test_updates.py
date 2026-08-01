@@ -813,6 +813,48 @@ def test_run_git_handles_missing_stdout_after_decode_thread_failure(tmp_path):
     assert out == ''
 
 
+@pytest.mark.parametrize('probe_output', [
+    'git exited with status 2',
+    'git exited with status 128',
+    'git exited with status -9',
+])
+def test_describe_git_version_suppresses_unknown_dirty_probe_status(
+    tmp_path, monkeypatch, probe_output,
+):
+    calls = []
+
+    def fake_git(args, cwd, timeout=10):
+        calls.append(args)
+        if args == ['describe', '--tags', '--always']:
+            return 'v0.52.5', True
+        if args == ['diff-index', '--quiet', 'HEAD', '--']:
+            return probe_output, False
+        raise AssertionError(f'unexpected git args: {args!r}')
+
+    monkeypatch.setattr(updates, '_run_git', fake_git)
+
+    assert updates._describe_git_version(tmp_path) == 'v0.52.5'
+    assert calls == [
+        ['describe', '--tags', '--always'],
+        ['diff-index', '--quiet', 'HEAD', '--'],
+    ]
+
+
+def test_describe_git_version_marks_exact_dirty_probe_status(tmp_path, monkeypatch):
+    def fake_git(args, cwd, timeout=10):
+        if args == ['describe', '--tags', '--always']:
+            return 'v0.52.5', True
+        if args == ['diff-index', '--quiet', 'HEAD', '--']:
+            return 'git exited with status 1', False
+        if args == ['diff', '--binary', 'HEAD', '--']:
+            return 'diff --git a/tracked.txt b/tracked.txt', True
+        raise AssertionError(f'unexpected git args: {args!r}')
+
+    monkeypatch.setattr(updates, '_run_git', fake_git)
+
+    assert updates._describe_git_version(tmp_path).startswith('v0.52.5-dirty-')
+
+
 def test_split_remote_ref_splits_tracking_ref():
     """_split_remote_ref should correctly split origin/branch."""
     assert updates._split_remote_ref('origin/master') == ('origin', 'master')
