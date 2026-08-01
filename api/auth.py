@@ -493,7 +493,8 @@ def is_oidc_auth_enabled() -> bool:
 
 
 def get_oidc_startup_warning() -> str | None:
-    """Return a startup warning when OIDC auth is only partially configured."""
+    """Return a startup warning when OIDC auth is only partially configured,
+    or when allow_values uses whitespace that is no longer a separator."""
     try:
         cfg = get_config()
         raw = cfg.get("webui_oidc") if isinstance(cfg, dict) else {}
@@ -515,24 +516,40 @@ def get_oidc_startup_warning() -> str | None:
 
     if not any((issuer, client_id, allow_claim, allow_values)):
         return None
-    if issuer and client_id and allow_claim and allow_values:
-        return None
 
-    missing = []
-    if not issuer:
-        missing.append("issuer")
-    if not client_id:
-        missing.append("client_id")
-    if not allow_claim:
-        missing.append("allow_claim")
-    if not allow_values:
-        missing.append("allow_values")
+    warnings = []
 
-    joined = ", ".join(missing)
-    return (
-        "Native OIDC login is only partially configured; missing "
-        f"{joined}. The WebUI will not enable OIDC auth until all four fields are set."
-    )
+    if not (issuer and client_id and allow_claim and allow_values):
+        missing = []
+        if not issuer:
+            missing.append("issuer")
+        if not client_id:
+            missing.append("client_id")
+        if not allow_claim:
+            missing.append("allow_claim")
+        if not allow_values:
+            missing.append("allow_values")
+        joined = ", ".join(missing)
+        warnings.append(
+            "Native OIDC login is only partially configured; missing "
+            f"{joined}. The WebUI will not enable OIDC auth until all four fields are set."
+        )
+
+    # Detect whitespace-only allow_values scalar that may contain multiple intended values.
+    # Runs unconditionally so the warning reaches startup even when other auth methods
+    # short-circuit is_auth_enabled() before the OIDC branch is evaluated.
+    raw_allow_env = os.getenv("HERMES_WEBUI_OIDC_ALLOW_VALUES")
+    raw_allow = raw_allow_env if raw_allow_env is not None else raw.get("allow_values")
+    if raw_allow is not None and not isinstance(raw_allow, (list, tuple, set)):
+        try:
+            from api.auth_oidc import _normalize_allow_values, _ALLOW_VALUES_WHITESPACE_WARNING
+            normalized = _normalize_allow_values(raw_allow)
+            if any(any(ch.isspace() for ch in v) for v in normalized):
+                warnings.append(_ALLOW_VALUES_WHITESPACE_WARNING)
+        except Exception:
+            logger.debug("Failed to check OIDC allow_values for whitespace", exc_info=True)
+
+    return "\n".join(warnings) if warnings else None
 
 
 def is_auth_enabled() -> bool:

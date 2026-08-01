@@ -3,12 +3,9 @@
 Scope: _resolve_oidc_config warning detection and _enforce_allowlist decisions.
 No whitespace splitting under any heuristic; the warning is diagnostic only.
 """
-import importlib.util
 import logging
-import os
 import sys
 from pathlib import Path
-from typing import Any
 from unittest.mock import patch
 
 sys.path.insert(0, str(Path(__file__).resolve().parent.parent))
@@ -18,30 +15,12 @@ import pytest
 import api.auth_oidc as auth_oidc
 from api.auth_oidc import _enforce_allowlist, _normalize_allow_values, OIDCAuthError
 
-_BASE_WORKTREE = r"D:\Repos\.claude\pr-sweep\base-worktrees\webui-6645-4085-before-320789ae"
-
 
 @pytest.fixture(autouse=True)
 def _reset_warned_cache():
     auth_oidc._warned_allow_values.clear()
     yield
     auth_oidc._warned_allow_values.clear()
-
-
-@pytest.fixture(scope="module")
-def base_normalize_allow_values():
-    """Load _normalize_allow_values from the base worktree for differential comparison."""
-    base_path = os.path.join(_BASE_WORKTREE, "api", "auth_oidc.py")
-    spec = importlib.util.spec_from_file_location("auth_oidc_base", base_path)
-    mod = importlib.util.module_from_spec(spec)
-    # Inject dependencies that are already loaded; _normalize_allow_values is pure.
-    sys.path.insert(0, _BASE_WORKTREE)
-    try:
-        spec.loader.exec_module(mod)
-    finally:
-        if _BASE_WORKTREE in sys.path:
-            sys.path.remove(_BASE_WORKTREE)
-    return mod._normalize_allow_values
 
 
 def _resolve(monkeypatch, *, env=None, cfg_list=None):
@@ -63,7 +42,7 @@ def _resolve(monkeypatch, *, env=None, cfg_list=None):
 
 
 # ---------------------------------------------------------------------------
-# reproduction — base-fails / head-passes
+# reproduction
 # ---------------------------------------------------------------------------
 
 def test_legacy_scalar_warns(monkeypatch, caplog):
@@ -71,19 +50,17 @@ def test_legacy_scalar_warns(monkeypatch, caplog):
     with caplog.at_level(logging.WARNING, logger="api.auth_oidc"):
         cfg = _resolve(monkeypatch, env="alice@example.com bob@example.com")
 
-    # head: warning names the setting
     assert any(
         "HERMES_WEBUI_OIDC_ALLOW_VALUES" in r.message for r in caplog.records
     ), "expected warning naming HERMES_WEBUI_OIDC_ALLOW_VALUES"
 
-    # head: warning names both accepted forms
     warning_text = " ".join(r.message for r in caplog.records)
     assert "comma" in warning_text.lower(), "warning must mention comma-delimited form"
     assert "yaml array" in warning_text.lower() or "yaml" in warning_text.lower(), (
         "warning must mention YAML array form"
     )
 
-    # head: allowlist unchanged — one combined value, claim still denied
+    # allowlist unchanged — one combined value, claim still denied
     assert cfg["allow_values"] == ["alice@example.com bob@example.com"]
     with pytest.raises(OIDCAuthError):
         _enforce_allowlist(
@@ -94,11 +71,11 @@ def test_legacy_scalar_warns(monkeypatch, caplog):
 
 
 # ---------------------------------------------------------------------------
-# authorization unchanged — differential
+# authorization unchanged
 # ---------------------------------------------------------------------------
 
 def test_enforce_decisions_unchanged(monkeypatch):
-    """_enforce_allowlist allow/deny decisions are identical to origin/master behavior."""
+    """_enforce_allowlist allow/deny decisions are correct for every standard input shape."""
     # no allow_claim → always passes
     _enforce_allowlist({"email": "anyone"}, allow_claim="", allow_values=[])
 
@@ -277,7 +254,7 @@ def test_canonical_no_warning(monkeypatch, caplog):
 
 
 # ---------------------------------------------------------------------------
-# mode/state matrix — one case per Fault Scope matrix row
+# mode/state matrix
 # ---------------------------------------------------------------------------
 
 def test_allow_values_matrix(monkeypatch, caplog):
@@ -342,7 +319,7 @@ def test_warning_not_per_request(monkeypatch, caplog):
 
 
 # ---------------------------------------------------------------------------
-# P1: Unicode whitespace — tab and NBSP separated scalars warn
+# Unicode whitespace
 # ---------------------------------------------------------------------------
 
 def test_tab_separated_scalar_warns(monkeypatch, caplog):
@@ -365,7 +342,7 @@ def test_tab_separated_scalar_warns(monkeypatch, caplog):
 
 def test_nbsp_separated_scalar_warns(monkeypatch, caplog):
     """Non-breaking-space-separated scalar emits a warning."""
-    nbsp_val = "alice@example.com\u00a0bob@example.com"
+    nbsp_val = "alice@example.com bob@example.com"
     with caplog.at_level(logging.WARNING, logger="api.auth_oidc"):
         cfg = _resolve(monkeypatch, env=nbsp_val)
 
@@ -393,41 +370,54 @@ def test_leading_trailing_whitespace_only_no_warn(monkeypatch, caplog):
 
 
 # ---------------------------------------------------------------------------
-# P2: unlisted-shape differential — head matches base for every input type
+# mixed comma-plus-space scalar
 # ---------------------------------------------------------------------------
 
-def test_normalize_allow_values_unlisted_shapes_match_base(base_normalize_allow_values):
-    """_normalize_allow_values output is identical to origin/master for unlisted shapes.
+def test_mixed_comma_space_scalar_warns(monkeypatch, caplog):
+    """Mixed comma-plus-space scalar warns; the element with inner whitespace silently denies."""
+    with caplog.at_level(logging.WARNING, logger="api.auth_oidc"):
+        cfg = _resolve(monkeypatch, env="alice@x.com bob@x.com, carol@x.com")
 
-    Shapes under test: None, bool, int, tuple, set, bare-CR scalar.
-    Uses the base worktree's implementation as the reference rather than asserting
-    constants, so the claim "for any input" is honest.
-    """
-    base = base_normalize_allow_values
-    head = _normalize_allow_values
+    assert cfg["allow_values"] == ["alice@x.com bob@x.com", "carol@x.com"]
+    warning_text = " ".join(r.message for r in caplog.records)
+    assert "HERMES_WEBUI_OIDC_ALLOW_VALUES" in warning_text, (
+        "mixed comma-plus-space scalar must emit a warning naming HERMES_WEBUI_OIDC_ALLOW_VALUES"
+    )
+    # The message must describe what was detected, not say the value contains no commas.
+    assert "internal whitespace" in warning_text, (
+        "warning must describe internal whitespace in entries, not claim the value has no commas"
+    )
+    # carol authenticates; alice and bob are denied (their combined address has inner whitespace)
+    _enforce_allowlist(
+        {"email": "carol@x.com"},
+        allow_claim="email",
+        allow_values=cfg["allow_values"],
+    )
+    with pytest.raises(OIDCAuthError):
+        _enforce_allowlist(
+            {"email": "alice@x.com"},
+            allow_claim="email",
+            allow_values=cfg["allow_values"],
+        )
 
-    shapes: list[Any] = [
-        None,
-        True,
-        False,
-        42,
-        3.14,
-        ("alice@example.com", "bob@example.com"),
-        {"alice@example.com", "bob@example.com"},
-        "alice\rbob",          # bare CR, no newline — stays combined
-        "",
-        "   ",
+
+# ---------------------------------------------------------------------------
+# unlisted input shapes
+# ---------------------------------------------------------------------------
+
+def test_normalize_allow_values_unlisted_shapes():
+    """_normalize_allow_values returns the expected value for every non-standard input shape."""
+    assert _normalize_allow_values(None) == []
+    assert _normalize_allow_values(True) == ["True"]
+    assert _normalize_allow_values(False) == ["False"]
+    assert _normalize_allow_values(42) == ["42"]
+    assert _normalize_allow_values(3.14) == ["3.14"]
+    assert _normalize_allow_values(("alice@example.com", "bob@example.com")) == [
+        "alice@example.com", "bob@example.com"
     ]
-
-    for raw in shapes:
-        head_result = head(raw)
-        base_result = base(raw)
-        # Sets have undefined order; compare as sets of strings.
-        if isinstance(raw, set):
-            assert set(head_result) == set(base_result), (
-                f"set input {raw!r}: head={head_result} base={base_result}"
-            )
-        else:
-            assert head_result == base_result, (
-                f"input {raw!r}: head={head_result!r} base={base_result!r}"
-            )
+    assert set(_normalize_allow_values({"alice@example.com", "bob@example.com"})) == {
+        "alice@example.com", "bob@example.com"
+    }
+    assert _normalize_allow_values("alice\rbob") == ["alice\rbob"]  # bare CR stays combined
+    assert _normalize_allow_values("") == []
+    assert _normalize_allow_values("   ") == []

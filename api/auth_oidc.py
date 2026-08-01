@@ -40,6 +40,14 @@ _jwks_cache: dict[str, tuple[float, dict[str, Any]]] = {}
 
 _warned_allow_values: set[str] = set()
 
+_ALLOW_VALUES_WHITESPACE_WARNING = (
+    "HERMES_WEBUI_OIDC_ALLOW_VALUES has one or more entries with internal whitespace; "
+    "whitespace is not a value separator, so a value like "
+    '"alice@example.com bob@example.com" is treated as a single entry. '
+    'Use a comma-delimited scalar (e.g. "value1,value2") or a YAML array. '
+    "If this is one intentional multi-word group, it is already correct and no action is needed."
+)
+
 
 class _NoRedirect(urllib.request.HTTPRedirectHandler):
     def redirect_request(self, *args, **kwargs):
@@ -173,19 +181,12 @@ def _resolve_oidc_config() -> dict[str, Any]:
     if (
         raw_allow is not None
         and not isinstance(raw_allow, (list, tuple, set))
-        and "," not in str(raw_allow)
-        and "\n" not in str(raw_allow)
-        and any(ch.isspace() for ch in str(raw_allow).strip())
+        and any(any(ch.isspace() for ch in v) for v in allow_values)
     ):
         key = str(raw_allow)
         if key not in _warned_allow_values:
             _warned_allow_values.add(key)
-            logger.warning(
-                "HERMES_WEBUI_OIDC_ALLOW_VALUES contains spaces but no commas or newlines; "
-                "whitespace is no longer a value separator. "
-                "Use a comma-delimited scalar (e.g. \"value1,value2\") or a YAML array. "
-                "If this value is one multi-word group name, it is already correct and needs no action."
-            )
+            logger.warning(_ALLOW_VALUES_WHITESPACE_WARNING)
     return {
         "issuer": str(pick("issuer", "HERMES_WEBUI_OIDC_ISSUER") or "").strip(),
         "client_id": str(pick("client_id", "HERMES_WEBUI_OIDC_CLIENT_ID") or "").strip(),
