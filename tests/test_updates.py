@@ -88,6 +88,31 @@ def test_check_repo_reports_release_gap_even_when_tag_fetch_fails(tmp_path):
     assert info['dirty'] is False
 
 
+def test_is_dirty_preserves_legacy_empty_failure_contract(tmp_path, monkeypatch):
+    (tmp_path / '.git').mkdir()
+    monkeypatch.setattr(updates, '_run_git', lambda *args, **kwargs: ('', False))
+
+    assert updates._is_dirty(tmp_path) is True
+
+
+@pytest.mark.parametrize(
+    'probe_output',
+    [
+        'git exited with status 2',
+        'git exited with status 128',
+        'git exited with status -9',
+        'fatal: unable to read index',
+    ],
+)
+def test_probe_dirty_keeps_non_status_one_failures_unknown(tmp_path, monkeypatch, probe_output):
+    (tmp_path / '.git').mkdir()
+    monkeypatch.setattr(
+        updates, '_run_git', lambda *args, **kwargs: (probe_output, False),
+    )
+
+    assert updates._probe_dirty(tmp_path) is None
+
+
 def test_check_repo_redacts_credentialed_fetch_failure(tmp_path):
     """Update-check errors must not expose credentials from git remotes."""
     (tmp_path / '.git').mkdir()

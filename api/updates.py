@@ -1280,12 +1280,14 @@ def _check_repo(path, name, channel=DEFAULT_UPDATE_CHANNEL):
     return None
 
 
-def _probe_dirty(path: Path, timeout: int = 1) -> bool | None:
+def _probe_dirty(
+    path: Path, timeout: int = 1, *, legacy_empty_is_dirty: bool = False,
+) -> bool | None:
     """Return dirty, clean, or unknown for a working-tree probe."""
     out, ok = _run_git(['diff-index', '--quiet', 'HEAD', '--'], path, timeout=timeout)
     if ok:
         return False
-    if out == 'git exited with status 1':
+    if out == 'git exited with status 1' or (legacy_empty_is_dirty and not out):
         return True
     logger.warning(
         'git dirty probe failed; treating working-tree state as unknown: %s',
@@ -1303,7 +1305,11 @@ def _is_dirty(path: Path, timeout: int = 1) -> bool:
     reported as clean so a transient probe failure never produces a false-
     positive "local changes" alert.
     """
-    return _probe_dirty(path, timeout=timeout) is True
+    # Older checker consumers model diff-index status 1 as ('', False). Keep
+    # that boolean contract here; force updates use the strict tri-state form.
+    return _probe_dirty(
+        path, timeout=timeout, legacy_empty_is_dirty=True,
+    ) is True
 
 
 def _ignored_agent_update_info() -> dict:
