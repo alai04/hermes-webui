@@ -120,7 +120,7 @@ def _run_sort_harness(body):
     end = UI_JS.index("// ── Workspace preferences kebab menu", start)
     source = UI_JS[start:end]
     script = """
-global.S={showHiddenWorkspaceFiles:true,workspaceSortKey:'name-asc'};
+global.S={session:{workspace:'/test'},showHiddenWorkspaceFiles:true,workspaceSortKey:'name-asc'};
 global.localStorage={getItem(key){return key==='hermes-workspace-show-hidden-files'?'1':null},setItem(){}};
 global.$=()=>null;
 function _visibleWorkspaceEntries(entries){return S.showHiddenWorkspaceFiles?entries:entries.filter(()=>true)}
@@ -192,6 +192,16 @@ renderFileTree();
 if(S._workspaceBirthtimeSeen!==false||S._workspaceBirthtimeWorkspace!=='')process.exit(1);
 """
     result = subprocess.run(["node", "-e", script], capture_output=True, text=True, check=False)
+    assert result.returncode == 0, result.stderr
+
+
+def test_session_teardown_disables_created_sort():
+    result = _run_sort_harness("""
+S._workspaceBirthtimeSeen=true;
+if(_workspaceCreatedSortAvailable()!==true)process.exit(1);
+S.session=null;
+if(_workspaceCreatedSortAvailable()!==false)process.exit(1);
+""")
     assert result.returncode == 0, result.stderr
 
 

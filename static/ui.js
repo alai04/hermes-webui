@@ -19779,7 +19779,7 @@ function _workspaceSortComparator(key){
   const field=key==='created-desc'?'birthtime_ns':'mtime_ns';
   return (a,b)=>_compareWorkspaceTimestampDesc(a,b,field);
 }
-function _workspaceCreatedSortAvailable(){return !!S._workspaceBirthtimeSeen;}
+function _workspaceCreatedSortAvailable(){return !!(S.session&&S.session.workspace&&S._workspaceBirthtimeSeen);}
 function _effectiveWorkspaceSortKey(){
   const key=_normalizeWorkspaceSortKey(S.workspaceSortKey);
   return key==='created-desc'&&!_workspaceCreatedSortAvailable()?WORKSPACE_SORT_DEFAULT:key;
