@@ -1,5 +1,6 @@
 """Tests for self-update diagnostics (api/updates.py)."""
 import json
+import logging
 import os
 import subprocess
 import time
@@ -42,7 +43,13 @@ def _dirty_stable_repo(tmp_path):
 
 @pytest.fixture(autouse=True)
 def _prevent_test_process_restart(monkeypatch):
-    # Keep successful mocked update tests from re-executing pytest on Windows.
+    """Keep update tests in-process.
+
+    Production restart replaces the pytest process after a delay. This
+    module-wide boundary only suppresses that replacement; it does not stub
+    update decisions or Git cleanup, and tests asserting restart patch it
+    locally.
+    """
     monkeypatch.setattr(updates, '_schedule_restart', MagicMock())
 
 
@@ -414,7 +421,7 @@ def test_force_update_clean_stable_no_ref_is_an_exact_noop(tmp_path, monkeypatch
         lambda: {'restart_blocked': False, 'active_streams': 0, 'active_runs': 0},
     )
     monkeypatch.setattr(updates, '_select_apply_compare_ref', lambda *args: None)
-    monkeypatch.setattr(updates, '_is_dirty', dirty)
+    monkeypatch.setattr(updates, '_probe_dirty', dirty)
     monkeypatch.setattr(updates, '_run_git', fake_git)
     restart = MagicMock()
     monkeypatch.setattr(updates, '_schedule_restart', restart)
@@ -428,7 +435,7 @@ def test_force_update_clean_stable_no_ref_is_an_exact_noop(tmp_path, monkeypatch
         'up_to_date': True,
         'channel': 'stable',
     }
-    dirty.assert_called_once_with(tmp_path)
+    dirty.assert_called_once_with(tmp_path, timeout=updates._FORCE_DIRTY_PROBE_TIMEOUT)
     assert calls == [['fetch', 'origin', '--quiet', '--tags', '--force']]
     restart.assert_not_called()
 
@@ -467,6 +474,93 @@ def test_force_update_dirty_probe_error_keeps_stable_no_ref_as_an_exact_noop(tmp
     assert calls == [
         ['fetch', 'origin', '--quiet', '--tags', '--force'],
         ['diff-index', '--quiet', 'HEAD', '--'],
+    ]
+    restart.assert_not_called()
+
+
+def test_force_update_dirty_probe_timeout_keeps_stable_no_ref_as_an_exact_noop(
+    tmp_path, monkeypatch, caplog,
+):
+    (tmp_path / '.git').mkdir()
+    calls = []
+
+    def fake_git(args, cwd, timeout=10):
+        calls.append((args, timeout))
+        if args == ['fetch', 'origin', '--quiet', '--tags', '--force']:
+            return '', True
+        if args == ['diff-index', '--quiet', 'HEAD', '--']:
+            return 'git diff-index --quiet HEAD -- timed out after 5s', False
+        raise AssertionError(f'unexpected git args: {args!r}')
+
+    monkeypatch.setattr(updates, 'REPO_ROOT', tmp_path)
+    monkeypatch.setattr(
+        updates, '_restart_blocker_snapshot',
+        lambda: {'restart_blocked': False, 'active_streams': 0, 'active_runs': 0},
+    )
+    monkeypatch.setattr(updates, '_select_apply_compare_ref', lambda *args: None)
+    monkeypatch.setattr(updates, '_run_git', fake_git)
+    restart = MagicMock()
+    monkeypatch.setattr(updates, '_schedule_restart', restart)
+
+    with caplog.at_level(logging.WARNING, logger='api.updates'):
+        result = updates.apply_force_update('webui', channel='stable')
+
+    assert result == {
+        'ok': True,
+        'message': 'webui is already up to date on the stable channel.',
+        'target': 'webui',
+        'up_to_date': True,
+        'channel': 'stable',
+    }
+    assert calls == [
+        (['fetch', 'origin', '--quiet', '--tags', '--force'], 15),
+        (['diff-index', '--quiet', 'HEAD', '--'], updates._FORCE_DIRTY_PROBE_TIMEOUT),
+    ]
+    assert 'working-tree state as unknown' in caplog.text
+    restart.assert_not_called()
+
+
+def test_force_update_dirty_stable_reset_failure_reports_head(tmp_path, monkeypatch):
+    (tmp_path / '.git').mkdir()
+    calls = []
+
+    def fake_git(args, cwd, timeout=10):
+        calls.append(args)
+        if args == ['fetch', 'origin', '--quiet', '--tags', '--force']:
+            return '', True
+        if args == ['diff-index', '--quiet', 'HEAD', '--']:
+            return 'git exited with status 1', False
+        if args == ['checkout', '.']:
+            return '', True
+        if args == ['clean', '-fd']:
+            return '', True
+        if args == ['merge-base', '--is-ancestor', 'HEAD', 'HEAD']:
+            return '', True
+        if args == ['reset', '--hard', 'HEAD']:
+            return 'unable to reset', False
+        raise AssertionError(f'unexpected git args: {args!r}')
+
+    monkeypatch.setattr(updates, 'REPO_ROOT', tmp_path)
+    monkeypatch.setattr(
+        updates, '_restart_blocker_snapshot',
+        lambda: {'restart_blocked': False, 'active_streams': 0, 'active_runs': 0},
+    )
+    monkeypatch.setattr(updates, '_select_apply_compare_ref', lambda *args: None)
+    monkeypatch.setattr(updates, '_run_git', fake_git)
+    restart = MagicMock()
+    monkeypatch.setattr(updates, '_schedule_restart', restart)
+
+    result = updates.apply_force_update('webui', channel='stable')
+
+    assert result == {'ok': False, 'message': 'Force reset to HEAD failed'}
+    assert calls == [
+        ['fetch', 'origin', '--quiet', '--tags', '--force'],
+        ['diff-index', '--quiet', 'HEAD', '--'],
+        ['merge-base', '--is-ancestor', 'HEAD', 'HEAD'],
+        ['merge-base', '--is-ancestor', 'HEAD', 'HEAD'],
+        ['checkout', '.'],
+        ['clean', '-fd'],
+        ['reset', '--hard', 'HEAD'],
     ]
     restart.assert_not_called()
 

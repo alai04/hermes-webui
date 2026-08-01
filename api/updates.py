@@ -45,6 +45,7 @@ _check_in_progress = False
 _apply_lock = threading.Lock()   # prevents concurrent stash/pull/pop on same repo
 CACHE_TTL = 1800  # 30 minutes
 _AGENT_GATEWAY_RESTART_RETRY_DELAY_S = 1.0
+_FORCE_DIRTY_PROBE_TIMEOUT = 5
 _GIT_DIAGNOSTIC_MAX_CHARS = 300
 _CREDENTIAL_IN_URL_RE = re.compile(r"([a-zA-Z][a-zA-Z0-9+.-]*://)([^/@\s'\"]+)@")
 _GITHUB_TOKEN_RE = re.compile(r"\b(?:gh[pousr]_[A-Za-z0-9_]{20,}|github_pat_[A-Za-z0-9_]{20,})\b")
@@ -1279,6 +1280,20 @@ def _check_repo(path, name, channel=DEFAULT_UPDATE_CHANNEL):
     return None
 
 
+def _probe_dirty(path: Path, timeout: int = 1) -> bool | None:
+    """Return dirty, clean, or unknown for a working-tree probe."""
+    out, ok = _run_git(['diff-index', '--quiet', 'HEAD', '--'], path, timeout=timeout)
+    if ok:
+        return False
+    if not out or out.startswith('git exited with status '):
+        return True
+    logger.warning(
+        'git dirty probe failed; treating working-tree state as unknown: %s',
+        out,
+    )
+    return None
+
+
 def _is_dirty(path: Path, timeout: int = 1) -> bool:
     """Return True when the working tree has uncommitted changes vs HEAD.
 
@@ -1288,10 +1303,7 @@ def _is_dirty(path: Path, timeout: int = 1) -> bool:
     reported as clean so a transient probe failure never produces a false-
     positive "local changes" alert.
     """
-    out, ok = _run_git(['diff-index', '--quiet', 'HEAD', '--'], path, timeout=timeout)
-    if ok:
-        return False
-    return not out or out.startswith('git exited with status ')
+    return _probe_dirty(path, timeout=timeout) is True
 
 
 def _ignored_agent_update_info() -> dict:
@@ -1992,7 +2004,10 @@ def apply_force_update(target: str, channel=None) -> dict:
         # force to. Do NOT fall back to origin/master (firehose). See
         # _select_apply_compare_ref channel semantics.
         if compare_ref is None:
-            if target == 'webui' and channel == 'stable' and _is_dirty(path):
+            dirty_state = None
+            if target == 'webui' and channel == 'stable':
+                dirty_state = _probe_dirty(path, timeout=_FORCE_DIRTY_PROBE_TIMEOUT)
+            if dirty_state is True:
                 compare_ref = 'HEAD'
             else:
                 return {
