@@ -426,7 +426,10 @@ def test_force_update_clean_stable_no_ref_is_an_exact_noop(tmp_path, monkeypatch
     restart = MagicMock()
     monkeypatch.setattr(updates, '_schedule_restart', restart)
 
-    result = updates.apply_force_update('webui', channel='stable')
+    checked_at = 1_700_000_001.0
+    with patch.dict(updates._update_cache, {'checked_at': checked_at}, clear=False):
+        result = updates.apply_force_update('webui', channel='stable')
+        assert updates._update_cache['checked_at'] == checked_at
 
     assert result == {
         'ok': True,
@@ -462,7 +465,10 @@ def test_force_update_dirty_probe_error_keeps_stable_no_ref_as_an_exact_noop(tmp
     restart = MagicMock()
     monkeypatch.setattr(updates, '_schedule_restart', restart)
 
-    result = updates.apply_force_update('webui', channel='stable')
+    checked_at = 1_700_000_002.0
+    with patch.dict(updates._update_cache, {'checked_at': checked_at}, clear=False):
+        result = updates.apply_force_update('webui', channel='stable')
+        assert updates._update_cache['checked_at'] == checked_at
 
     assert result == {
         'ok': True,
@@ -502,8 +508,11 @@ def test_force_update_dirty_probe_timeout_keeps_stable_no_ref_as_an_exact_noop(
     restart = MagicMock()
     monkeypatch.setattr(updates, '_schedule_restart', restart)
 
+    checked_at = 1_700_000_003.0
     with caplog.at_level(logging.WARNING, logger='api.updates'):
-        result = updates.apply_force_update('webui', channel='stable')
+        with patch.dict(updates._update_cache, {'checked_at': checked_at}, clear=False):
+            result = updates.apply_force_update('webui', channel='stable')
+            assert updates._update_cache['checked_at'] == checked_at
 
     assert result == {
         'ok': True,
@@ -544,8 +553,11 @@ def test_force_update_dirty_probe_non_dirty_status_keeps_stable_no_ref_as_an_exa
     restart = MagicMock()
     monkeypatch.setattr(updates, '_schedule_restart', restart)
 
+    checked_at = 1_700_000_004.0
     with caplog.at_level(logging.WARNING, logger='api.updates'):
-        result = updates.apply_force_update('webui', channel='stable')
+        with patch.dict(updates._update_cache, {'checked_at': checked_at}, clear=False):
+            result = updates.apply_force_update('webui', channel='stable')
+            assert updates._update_cache['checked_at'] == checked_at
 
     assert result == {
         'ok': True,
