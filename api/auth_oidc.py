@@ -41,8 +41,8 @@ _jwks_cache: dict[str, tuple[float, dict[str, Any]]] = {}
 _warned_allow_values: set[str] = set()
 
 _ALLOW_VALUES_WHITESPACE_WARNING = (
-    "HERMES_WEBUI_OIDC_ALLOW_VALUES has one or more entries with internal whitespace; "
-    "whitespace is not a value separator, so a value like "
+    "webui_oidc.allow_values (HERMES_WEBUI_OIDC_ALLOW_VALUES) has one or more entries "
+    "with internal whitespace; whitespace is not a value separator, so a value like "
     '"alice@example.com bob@example.com" is treated as a single entry. '
     'Use a comma-delimited scalar (e.g. "value1,value2") or a YAML array. '
     "If this is one intentional multi-word group, it is already correct and no action is needed."
