@@ -512,7 +512,18 @@ def get_oidc_startup_warning() -> str | None:
     issuer = bool(pick("issuer", "HERMES_WEBUI_OIDC_ISSUER"))
     client_id = bool(pick("client_id", "HERMES_WEBUI_OIDC_CLIENT_ID"))
     allow_claim = bool(pick("allow_claim", "HERMES_WEBUI_OIDC_ALLOW_CLAIM"))
-    allow_values = bool(pick("allow_values", "HERMES_WEBUI_OIDC_ALLOW_VALUES"))
+    raw_allow_env = os.getenv("HERMES_WEBUI_OIDC_ALLOW_VALUES")
+    raw_allow = raw_allow_env if raw_allow_env is not None else raw.get("allow_values")
+    normalized_allow_values = []
+    allow_values_warning = None
+    try:
+        from api import auth_oidc
+
+        normalized_allow_values = auth_oidc._normalize_allow_values(raw_allow)
+        allow_values_warning = auth_oidc._ALLOW_VALUES_WHITESPACE_WARNING
+    except Exception:
+        logger.debug("Failed to normalize OIDC allow_values", exc_info=True)
+    allow_values = bool(normalized_allow_values)
 
     if not any((issuer, client_id, allow_claim, allow_values)):
         return None
@@ -538,16 +549,13 @@ def get_oidc_startup_warning() -> str | None:
     # Detect whitespace-only allow_values scalar that may contain multiple intended values.
     # Runs unconditionally so the warning reaches startup even when other auth methods
     # short-circuit is_auth_enabled() before the OIDC branch is evaluated.
-    raw_allow_env = os.getenv("HERMES_WEBUI_OIDC_ALLOW_VALUES")
-    raw_allow = raw_allow_env if raw_allow_env is not None else raw.get("allow_values")
-    if raw_allow is not None and not isinstance(raw_allow, (list, tuple, set)):
-        try:
-            from api.auth_oidc import _normalize_allow_values, _ALLOW_VALUES_WHITESPACE_WARNING
-            normalized = _normalize_allow_values(raw_allow)
-            if any(any(ch.isspace() for ch in v) for v in normalized):
-                warnings.append(_ALLOW_VALUES_WHITESPACE_WARNING)
-        except Exception:
-            logger.debug("Failed to check OIDC allow_values for whitespace", exc_info=True)
+    if (
+        allow_values_warning is not None
+        and raw_allow is not None
+        and not isinstance(raw_allow, (list, tuple, set))
+        and any(any(ch.isspace() for ch in v) for v in normalized_allow_values)
+    ):
+        warnings.append(allow_values_warning)
 
     return "\n".join(warnings) if warnings else None
 

@@ -17,10 +17,73 @@ from api.auth_oidc import _enforce_allowlist, _normalize_allow_values, OIDCAuthE
 
 
 @pytest.fixture(autouse=True)
+def _clear_oidc_environment(monkeypatch):
+    for name in (
+        "HERMES_WEBUI_OIDC_ISSUER",
+        "HERMES_WEBUI_OIDC_CLIENT_ID",
+        "HERMES_WEBUI_OIDC_ALLOW_CLAIM",
+        "HERMES_WEBUI_OIDC_ALLOW_VALUES",
+    ):
+        monkeypatch.delenv(name, raising=False)
+
+
+@pytest.fixture(autouse=True)
 def _reset_warned_cache():
     auth_oidc._warned_allow_values.clear()
     yield
     auth_oidc._warned_allow_values.clear()
+
+
+def _startup_warning(monkeypatch, allow_values):
+    import api.auth as auth
+
+    monkeypatch.setattr(
+        auth,
+        "get_config",
+        lambda: {
+            "webui_oidc": {
+                "issuer": "https://issuer.example",
+                "client_id": "webui-client",
+                "allow_claim": "email",
+                "allow_values": allow_values,
+            }
+        },
+    )
+    return auth.get_oidc_startup_warning()
+
+
+@pytest.mark.parametrize("allow_values", [[], [""]])
+def test_startup_warning_treats_empty_allowlist_shapes_as_missing(monkeypatch, allow_values):
+    warning = _startup_warning(monkeypatch, allow_values)
+
+    assert warning is not None
+    assert "allow_values" in warning
+    assert auth_oidc._ALLOW_VALUES_WHITESPACE_WARNING not in warning
+
+
+def test_startup_warning_accepts_multi_word_list(monkeypatch):
+    assert _startup_warning(monkeypatch, ["Hermes Users"]) is None
+
+
+def test_startup_warning_accepts_comma_scalar(monkeypatch):
+    assert _startup_warning(monkeypatch, "alice@example.com,bob@example.com") is None
+
+
+def test_startup_warning_reports_whitespace_scalar_migration(monkeypatch):
+    warning = _startup_warning(monkeypatch, "alice@example.com bob@example.com")
+
+    assert warning is not None
+    assert "partially configured" not in warning
+    assert auth_oidc._ALLOW_VALUES_WHITESPACE_WARNING in warning
+
+
+def test_startup_warning_uses_environment_allow_values_precedence(monkeypatch):
+    monkeypatch.setenv("HERMES_WEBUI_OIDC_ALLOW_VALUES", "")
+
+    warning = _startup_warning(monkeypatch, ["alice@example.com"])
+
+    assert warning is not None
+    assert "allow_values" in warning
 
 
 def _resolve(monkeypatch, *, env=None, cfg_list=None):
