@@ -83,6 +83,7 @@ def test_escape_symlink_birthtime_is_link_local(tmp_path):
         pytest.skip(f"symlink unavailable: {exc}")
     entry = next(item for item in workspace_api.list_dir(workspace, ".") if item["name"] == "escape.txt")
     assert entry["target_outside_workspace"] is True
+    assert entry["workspace_sort_rank"] == 0
     birthtime_ns = getattr(workspace_api, "_birthtime_ns", None)
     assert birthtime_ns is not None, "_birthtime_ns helper is missing"
     assert entry["birthtime_ns"] == birthtime_ns(link.lstat())
