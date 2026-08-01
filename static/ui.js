@@ -19746,10 +19746,8 @@ function _normalizeWorkspaceSortKey(value){
   return WORKSPACE_SORT_KEYS.includes(value)?value:WORKSPACE_SORT_DEFAULT;
 }
 function _workspaceEntryRank(item){
-  const type=item&&item.type;
-  if(type==='symlink') return 0;
-  if(type==='dir') return 1;
-  return 2;
+  const rank=parseInt(item&&item.workspace_sort_rank,10);
+  return rank===0||rank===1||rank===2?rank:1;
 }
 function _workspaceEntryTimestampKey(item,field){
   const raw=item&&item[field];

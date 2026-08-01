@@ -9,6 +9,7 @@ def test_browser_workspace_entries_stringify_nanosecond_fields():
             "name": "newer.txt",
             "path": "newer.txt",
             "type": "file",
+            "workspace_sort_rank": 2,
             "mtime_ns": 1_752_598_800_000_000_001,
             "birthtime_ns": 1_752_598_800_000_000_000,
         },
@@ -16,6 +17,7 @@ def test_browser_workspace_entries_stringify_nanosecond_fields():
             "name": "missing.txt",
             "path": "missing.txt",
             "type": "file",
+            "workspace_sort_rank": 1,
             "mtime_ns": None,
             "birthtime_ns": None,
         },
@@ -27,5 +29,7 @@ def test_browser_workspace_entries_stringify_nanosecond_fields():
     assert payload[0]["birthtime_ns"] == "1752598800000000000"
     assert payload[1]["mtime_ns"] is None
     assert payload[1]["birthtime_ns"] is None
+    assert payload[0]["workspace_sort_rank"] == 2
+    assert payload[1]["workspace_sort_rank"] == 1
     assert entries[0]["mtime_ns"] == 1_752_598_800_000_000_001
     assert entries[0]["birthtime_ns"] == 1_752_598_800_000_000_000

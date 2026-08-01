@@ -2,6 +2,7 @@
 
 import hashlib
 import json
+import os
 import subprocess
 from pathlib import Path
 
@@ -22,6 +23,31 @@ def test_list_dir_emits_birthtime_ns(tmp_path):
     assert {entry["type"] for entry in entries} == {"file", "dir"}
     assert all("birthtime_ns" in entry for entry in entries)
     assert all(isinstance(entry["birthtime_ns"], (int, type(None))) for entry in entries)
+    assert {entry["workspace_sort_rank"] for entry in entries} == {1, 2}
+
+
+def test_list_dir_emits_server_partition_rank_for_special_entries(tmp_path, monkeypatch):
+    if not hasattr(os, "mkfifo"):
+        pytest.skip("FIFO creation is unavailable on this platform")
+    try:
+        os.mkfifo(tmp_path / "fifo")
+        (tmp_path / "directory").mkdir()
+        (tmp_path / "file.txt").write_text("x", encoding="utf-8")
+        link_target = tmp_path / "file.txt"
+        (tmp_path / "link").symlink_to(link_target)
+    except (OSError, NotImplementedError) as exc:
+        pytest.skip(f"special entry creation unavailable: {exc}")
+
+    modes = [False]
+    if workspace_api._DIR_FD_OK:
+        modes.append(True)
+    for use_dir_fd in modes:
+        monkeypatch.setattr(workspace_api, "_DIR_FD_OK", use_dir_fd)
+        entries = {entry["name"]: entry for entry in workspace_api.list_dir(tmp_path, ".")}
+        assert entries["link"]["workspace_sort_rank"] == 0
+        assert entries["directory"]["workspace_sort_rank"] == 1
+        assert entries["fifo"]["workspace_sort_rank"] == 1
+        assert entries["file.txt"]["workspace_sort_rank"] == 2
 
 
 def test_birthtime_ns_platform_matrix(monkeypatch):
@@ -105,7 +131,7 @@ function _visibleWorkspaceEntries(entries){return S.showHiddenWorkspaceFiles?ent
 def test_sort_modified_desc_within_rank():
     result = _run_sort_harness("""
 S.workspaceSortKey='modified-desc';
-const input=[{name:'file-old',type:'file',mtime_ns:1},{name:'dir',type:'dir',mtime_ns:2},{name:'file-new',type:'file',mtime_ns:3},{name:'link',type:'symlink',mtime_ns:0}];
+const input=[{name:'file-old',type:'file',workspace_sort_rank:2,mtime_ns:1},{name:'dir',type:'dir',workspace_sort_rank:1,mtime_ns:2},{name:'file-new',type:'file',workspace_sort_rank:2,mtime_ns:3},{name:'link',type:'symlink',workspace_sort_rank:0,mtime_ns:0}];
 const out=_workspaceEntriesForRender(input).map(x=>x.name);
 if(JSON.stringify(out)!=='[\"link\",\"dir\",\"file-new\",\"file-old\"]')process.exit(1);
 """)
@@ -115,7 +141,7 @@ if(JSON.stringify(out)!=='[\"link\",\"dir\",\"file-new\",\"file-old\"]')process.
 def test_sort_name_desc_within_rank():
     result = _run_sort_harness("""
 S.workspaceSortKey='name-desc';
-const input=[{name:'a',type:'file'},{name:'dir',type:'dir'},{name:'b',type:'file'},{name:'link',type:'symlink'}];
+const input=[{name:'a',type:'file',workspace_sort_rank:2},{name:'dir',type:'dir',workspace_sort_rank:1},{name:'b',type:'file',workspace_sort_rank:2},{name:'link',type:'symlink',workspace_sort_rank:0}];
 const out=_workspaceEntriesForRender(input).map(x=>x.name);
 if(JSON.stringify(out)!=='[\"link\",\"dir\",\"b\",\"a\"]')process.exit(1);
 """)
@@ -133,8 +159,15 @@ if(out!==input||out[0]!==input[0])process.exit(1);
 
 def test_rank_grouping_holds_all_keys():
     result = _run_sort_harness("""
-const input=[{name:'s',type:'symlink',mtime_ns:1},{name:'d',type:'dir',mtime_ns:2},{name:'f',type:'file',mtime_ns:3}];
-for(const key of WORKSPACE_SORT_KEYS){S.workspaceSortKey=key;const ranks=_workspaceEntriesForRender(input).map(_workspaceEntryRank);if(ranks.some((x,i)=>i&&x<ranks[i-1]))process.exit(1)}
+const input=[{name:'file',type:'file',workspace_sort_rank:2,mtime_ns:3},{name:'fifo',type:'file',workspace_sort_rank:1,mtime_ns:4},{name:'dir',type:'dir',workspace_sort_rank:1,mtime_ns:2},{name:'link',type:'symlink',workspace_sort_rank:0,mtime_ns:1}];
+for(const key of ['name-desc','created-desc','modified-desc']){S.workspaceSortKey=key;S._workspaceBirthtimeSeen=true;const ranks=_workspaceEntriesForRender(input).map(_workspaceEntryRank);if(JSON.stringify(ranks)!=='[0,1,1,2]')process.exit(1)}
+""")
+    assert result.returncode == 0, result.stderr
+
+
+def test_unknown_workspace_rank_uses_non_regular_partition():
+    result = _run_sort_harness("""
+if(_workspaceEntryRank({type:'file'})!==1||_workspaceEntryRank({type:'file',workspace_sort_rank:'bogus'})!==1||_workspaceEntryRank({type:'file',workspace_sort_rank:3})!==1)process.exit(1);
 """)
     assert result.returncode == 0, result.stderr
 
@@ -142,7 +175,7 @@ for(const key of WORKSPACE_SORT_KEYS){S.workspaceSortKey=key;const ranks=_worksp
 def test_missing_timestamps_sort_last():
     result = _run_sort_harness("""
 S.workspaceSortKey='created-desc';S._workspaceBirthtimeSeen=true;
-const input=[{name:'missing',type:'file',birthtime_ns:null},{name:'zero',type:'file',birthtime_ns:0},{name:'new',type:'file',birthtime_ns:2},{name:'undefined',type:'file'}];
+const input=[{name:'missing',type:'file',workspace_sort_rank:2,birthtime_ns:null},{name:'zero',type:'file',workspace_sort_rank:2,birthtime_ns:0},{name:'new',type:'file',workspace_sort_rank:2,birthtime_ns:2},{name:'undefined',type:'file',workspace_sort_rank:2}];
 const out=_workspaceEntriesForRender(input).map(x=>x.name);
 if(JSON.stringify(out)!=='[\"new\",\"zero\",\"missing\",\"undefined\"]')process.exit(1);
 """)
@@ -152,7 +185,7 @@ if(JSON.stringify(out)!=='[\"new\",\"zero\",\"missing\",\"undefined\"]')process.
 def test_large_nanosecond_strings_sort_exactly():
     result = _run_sort_harness("""
 S.workspaceSortKey='modified-desc';
-const input=[{name:'older',type:'file',mtime_ns:'1752598800000000000'},{name:'newer',type:'file',mtime_ns:'1752598800000000001'}];
+const input=[{name:'older',type:'file',workspace_sort_rank:2,mtime_ns:'1752598800000000000'},{name:'newer',type:'file',workspace_sort_rank:2,mtime_ns:'1752598800000000001'}];
 const out=_workspaceEntriesForRender(input).map(x=>x.name);
 if(JSON.stringify(out)!=='[\"newer\",\"older\"]')process.exit(1);
 """)
@@ -162,7 +195,7 @@ if(JSON.stringify(out)!=='[\"newer\",\"older\"]')process.exit(1);
 def test_signed_nanosecond_values_sort_exactly():
     result = _run_sort_harness("""
 S.workspaceSortKey='modified-desc';
-const input=[{name:'negative-string',type:'file',mtime_ns:'-2'},{name:'zero',type:'file',mtime_ns:0},{name:'negative-number',type:'file',mtime_ns:-1}];
+const input=[{name:'negative-string',type:'file',workspace_sort_rank:2,mtime_ns:'-2'},{name:'zero',type:'file',workspace_sort_rank:2,mtime_ns:0},{name:'negative-number',type:'file',workspace_sort_rank:2,mtime_ns:-1}];
 const out=_workspaceEntriesForRender(input).map(x=>x.name);
 if(JSON.stringify(out)!=='[\"zero\",\"negative-number\",\"negative-string\"]')process.exit(1);
 """)
@@ -172,7 +205,7 @@ if(JSON.stringify(out)!=='[\"zero\",\"negative-number\",\"negative-string\"]')pr
 def test_signed_zero_and_leading_zero_strings_compare_equal():
     result = _run_sort_harness("""
 S.workspaceSortKey='modified-desc';
-const input=[{name:'zero',type:'file',mtime_ns:'0'},{name:'negative-zero',type:'file',mtime_ns:'-0'},{name:'positive-zero',type:'file',mtime_ns:'+0'},{name:'leading-zero',type:'file',mtime_ns:'000'},{name:'negative-leading-zero',type:'file',mtime_ns:'-00'}];
+const input=[{name:'zero',type:'file',workspace_sort_rank:2,mtime_ns:'0'},{name:'negative-zero',type:'file',workspace_sort_rank:2,mtime_ns:'-0'},{name:'positive-zero',type:'file',workspace_sort_rank:2,mtime_ns:'+0'},{name:'leading-zero',type:'file',workspace_sort_rank:2,mtime_ns:'000'},{name:'negative-leading-zero',type:'file',workspace_sort_rank:2,mtime_ns:'-00'}];
 if(['0','-0','+0','000','-00'].some(value=>_workspaceEntryTimestampKey({mtime_ns:value},'mtime_ns')!=='0'))process.exit(1);
 const out=_workspaceEntriesForRender(input).map(x=>x.name);
 if(JSON.stringify(out)!=='[\"zero\",\"negative-zero\",\"positive-zero\",\"leading-zero\",\"negative-leading-zero\"]')process.exit(1);
@@ -210,7 +243,7 @@ def test_created_pref_survives_unavailable():
 const mk=()=>({hidden:true,attrs:{},setAttribute(k,v){this.attrs[k]=String(v);},removeAttribute(k){delete this.attrs[k];}});
 const ind=mk(),dot=mk();
 S.showHiddenWorkspaceFiles=false;S._workspaceBirthtimeSeen=false;S.workspaceSortKey='created-desc';
-const input=[{name:'b',type:'file',birthtime_ns:null},{name:'a',type:'file',birthtime_ns:null}];
+const input=[{name:'b',type:'file',workspace_sort_rank:2,birthtime_ns:null},{name:'a',type:'file',workspace_sort_rank:2,birthtime_ns:null}];
 _noteWorkspaceBirthtimeSupport(input);
 const out=_workspaceEntriesForRender(input).map(x=>x.name);
 _syncWorkspacePrefsIndicators(ind,dot);
@@ -243,7 +276,7 @@ const row={attrs:{},classList:{toggle(){}},setAttribute(k,v){this.attrs[k]=Strin
 _workspacePrefsMenu={querySelectorAll(sel){return sel==='.workspace-prefs-item--radio'?[row]:[];}};
 S.session={workspace:'/one'};
 _syncWorkspaceBirthtimeSupportScope(S.session.workspace);
-_noteWorkspaceBirthtimeSupport([{name:'seen',type:'file',birthtime_ns:'1752598800000000001'}]);
+_noteWorkspaceBirthtimeSupport([{name:'seen',type:'file',workspace_sort_rank:2,birthtime_ns:'1752598800000000001'}]);
 if(_workspaceCreatedSortAvailable()!==true)process.exit(1);
 S.session={workspace:'/two'};
 _syncWorkspaceBirthtimeSupportScope(S.session.workspace);
