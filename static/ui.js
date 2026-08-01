@@ -19746,7 +19746,7 @@ function _normalizeWorkspaceSortKey(value){
   return WORKSPACE_SORT_KEYS.includes(value)?value:WORKSPACE_SORT_DEFAULT;
 }
 function _workspaceEntryRank(item){
-  const rank=parseInt(item&&item.workspace_sort_rank,10);
+  const rank=item&&item.workspace_sort_rank;
   return rank===0||rank===1||rank===2?rank:1;
 }
 function _workspaceEntryTimestampKey(item,field){
@@ -20154,15 +20154,16 @@ function renderFileTree(){
   box.innerHTML='';
   // Cache current dir entries
   S._dirCache[S.currentDir||'.']=S.entries;
-  _noteWorkspaceBirthtimeSupport(S.entries);
   // Show empty-state when no workspace is set or the directory is empty (#703)
   const emptyEl=$('wsEmptyState');
   const hasWorkspace=!!(S.session&&S.session.workspace);
   if(!hasWorkspace){
+    _syncWorkspaceBirthtimeSupportScope('');
     if(emptyEl){emptyEl.textContent=t('workspace_empty_no_path');emptyEl.style.display='flex';}
     box.style.display='none';
     return;
   }
+  _noteWorkspaceBirthtimeSupport(S.entries);
   if(emptyEl) emptyEl.style.display='none';
   box.style.display='';
   const visibleEntries=_workspaceEntriesForRender(S.entries);

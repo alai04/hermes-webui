@@ -167,8 +167,31 @@ for(const key of ['name-desc','created-desc','modified-desc']){S.workspaceSortKe
 
 def test_unknown_workspace_rank_uses_non_regular_partition():
     result = _run_sort_harness("""
-if(_workspaceEntryRank({type:'file'})!==1||_workspaceEntryRank({type:'file',workspace_sort_rank:'bogus'})!==1||_workspaceEntryRank({type:'file',workspace_sort_rank:3})!==1)process.exit(1);
+if(_workspaceEntryRank({type:'file'})!==1||_workspaceEntryRank({type:'file',workspace_sort_rank:'2garbage'})!==1||_workspaceEntryRank({type:'file',workspace_sort_rank:2.5})!==1||_workspaceEntryRank({type:'file',workspace_sort_rank:'bogus'})!==1||_workspaceEntryRank({type:'file',workspace_sort_rank:3})!==1)process.exit(1);
 """)
+    assert result.returncode == 0, result.stderr
+
+
+def test_no_workspace_render_clears_birthtime_support():
+    start = UI_JS.index("function renderFileTree(){")
+    end = UI_JS.index("let _wsActiveDragPath=", start)
+    render_source = UI_JS[start:end]
+    sort_start = UI_JS.index("const WORKSPACE_SORT_KEYS=")
+    sort_end = UI_JS.index("// ── Workspace preferences kebab menu", sort_start)
+    sort_source = UI_JS[sort_start:sort_end]
+    script = """
+const box={scrollTop:0,innerHTML:'',style:{}};
+const empty={textContent:'',style:{}};
+global.S={session:null,entries:[],currentDir:'.',_dirCache:{},showHiddenWorkspaceFiles:true,workspaceSortKey:'created-desc',_workspaceBirthtimeSeen:true,_workspaceBirthtimeWorkspace:'/old'};
+global.localStorage={getItem(){return null},setItem(){}};
+global.$=id=>id==='fileTree'?box:id==='wsEmptyState'?empty:null;
+global.t=()=>'';
+var _workspacePrefsMenu=null;
+""" + sort_source + render_source + """
+renderFileTree();
+if(S._workspaceBirthtimeSeen!==false||S._workspaceBirthtimeWorkspace!=='')process.exit(1);
+"""
+    result = subprocess.run(["node", "-e", script], capture_output=True, text=True, check=False)
     assert result.returncode == 0, result.stderr
 
 
