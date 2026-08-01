@@ -1899,6 +1899,31 @@ def _agent_gateway_restart_failure_message(target: str, restart_result: dict) ->
     )
 
 
+def _discard_local_changes(path: Path, reset_ref: str) -> bool:
+    """Discard local changes and reset *path* to *reset_ref*."""
+    # Do not use -x: ignored build/cache artifacts should survive force update.
+    _run_git(['checkout', '.'], path)
+    # Best-effort clean: a `git clean -fd` failure is NOT fatal. The
+    # following `reset --hard` overwrites any tracked-file collisions
+    # regardless, and residual untracked files that git can't delete are
+    # harmless. In particular, on Windows a file named after a reserved
+    # device name (nul, con, prn, aux, com1-9, lpt1-9) — which can appear
+    # in the working tree when a shell command redirects to `> nul` under
+    # Git Bash — cannot be removed via the normal Win32 path that git uses,
+    # so `clean` exits non-zero. Aborting the whole force update over that
+    # left users stuck (issue #4914). Log the stderr for diagnostics and
+    # proceed to the reset, which is what actually applies the update.
+    clean_out, clean_ok = _run_git(['clean', '-fd'], path)
+    if not clean_ok:
+        logger.warning(
+            'force_apply_update: `git clean -fd` failed (non-fatal, '
+            'continuing to reset --hard): %s',
+            clean_out,
+        )
+    _, ok = _run_git(['reset', '--hard', reset_ref], path)
+    return ok
+
+
 def apply_force_update(target: str, channel=None) -> dict:
     """Force-reset the target repo to the latest remote HEAD.
 
@@ -1967,13 +1992,16 @@ def apply_force_update(target: str, channel=None) -> dict:
         # force to. Do NOT fall back to origin/master (firehose). See
         # _select_apply_compare_ref channel semantics.
         if compare_ref is None:
-            return {
-                'ok': True,
-                'message': f'{target} is already up to date on the {channel} channel.',
-                'target': target,
-                'up_to_date': True,
-                'channel': channel,
-            }
+            if target == 'webui' and channel == 'stable' and _is_dirty(path):
+                compare_ref = 'HEAD'
+            else:
+                return {
+                    'ok': True,
+                    'message': f'{target} is already up to date on the {channel} channel.',
+                    'target': target,
+                    'up_to_date': True,
+                    'channel': channel,
+                }
 
         # Rewind guard (Codex CORE #3): refuse to reset --hard onto a ref that
         # is an ANCESTOR of HEAD — that would downgrade the checkout. This is the
@@ -1995,28 +2023,7 @@ def apply_force_update(target: str, channel=None) -> dict:
                 'channel': channel,
                 'refused_rewind': True,
             }
-        # Discard local modifications and untracked colliders before resetting.
-        # Do not use -x: ignored build/cache artifacts should survive force update.
-        _run_git(['checkout', '.'], path)
-        # Best-effort clean: a `git clean -fd` failure is NOT fatal. The
-        # following `reset --hard` overwrites any tracked-file collisions
-        # regardless, and residual untracked files that git can't delete are
-        # harmless. In particular, on Windows a file named after a reserved
-        # device name (nul, con, prn, aux, com1-9, lpt1-9) — which can appear
-        # in the working tree when a shell command redirects to `> nul` under
-        # Git Bash — cannot be removed via the normal Win32 path that git uses,
-        # so `clean` exits non-zero. Aborting the whole force update over that
-        # left users stuck (issue #4914). Log the stderr for diagnostics and
-        # proceed to the reset, which is what actually applies the update.
-        clean_out, clean_ok = _run_git(['clean', '-fd'], path)
-        if not clean_ok:
-            logger.warning(
-                'force_apply_update: `git clean -fd` failed (non-fatal, '
-                'continuing to reset --hard): %s',
-                clean_out,
-            )
-        _, ok = _run_git(['reset', '--hard', compare_ref], path)
-        if not ok:
+        if not _discard_local_changes(path, compare_ref):
             return {'ok': False, 'message': f'Force reset to {compare_ref} failed'}
 
         with _cache_lock:
