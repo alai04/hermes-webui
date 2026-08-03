@@ -10373,18 +10373,42 @@ function _pendingCurrentTailUserMessage(messages){
   return null;
 }
 
-// Tolerance when matching a transcript row against session.pending_started_at.
-// Some persistence paths stamp the active turn's user row with the exact float
-// started_at, others truncate to whole seconds (observed drift up to ~0.4s), and
-// state.db round-trips lose sub-microsecond precision. 1.5s absorbs all of those
-// while staying far below the gap between two genuinely separate turns.
-const _PENDING_ACTIVE_TURN_TS_TOLERANCE=1.5;
+// Precision-only epsilon when matching a transcript row against
+// session.pending_started_at. The server stamps the active turn's user row with
+// the exact pending_started_at float; state.db round-trips can lose
+// sub-microsecond precision, so 1e-6 absorbs float drift without ever treating a
+// whole-second (or sub-second) difference as identity. Anything wider is
+// ambiguous — a fast "继续"/"continue" double-send lands ~1s after the previous
+// turn — and must NOT match: fail toward materializing the pending turn (a
+// harmless transient duplicate the settle render clears) rather than hiding a
+// turn and moving its attachments onto an earlier row.
+const _PENDING_ACTIVE_TURN_TS_EPSILON=1e-6;
 
 function _messageTimestampSeconds(msg){
   if(!msg) return null;
   const raw=msg._ts!=null?msg._ts:msg.timestamp;
   const value=Number(raw);
   return Number.isFinite(value)&&value>0?value:null;
+}
+
+/**
+ * Exact-identity match for the active turn's user row via its
+ * `_active_turn_token`, mirroring the server's `build_active_turn_token`
+ * ("{stream_id}:{started_at}") stamped by the eager-checkpoint path. The token
+ * embeds the stream_id, which no other turn can share, so a row carrying the
+ * current session's token IS the active turn — no timestamp tolerance needed.
+ */
+function _activeTurnTokenMatches(msg, session){
+  if(!msg||typeof msg._active_turn_token!=='string') return false;
+  const streamId=session&&session.active_stream_id;
+  const startedAt=Number(session&&session.pending_started_at);
+  if(!streamId||!Number.isFinite(startedAt)||startedAt<=0) return false;
+  const sep=msg._active_turn_token.lastIndexOf(':');
+  if(sep<=0) return false;
+  if(msg._active_turn_token.slice(0,sep).trim()!==String(streamId).trim()) return false;
+  const tokenStarted=Number(msg._active_turn_token.slice(sep+1));
+  return Number.isFinite(tokenStarted)&&tokenStarted>0
+    && Math.abs(tokenStarted-startedAt)<=_PENDING_ACTIVE_TURN_TS_EPSILON;
 }
 
 /**
@@ -10402,11 +10426,16 @@ function _messageTimestampSeconds(msg){
  *
  * Scanning past assistant/tool rows alone would be wrong: a user who submits the
  * same text twice in a row (a plain "继续" follow-up) legitimately gets two
- * identical user turns, and matching on text would swallow the new one. So the
- * discriminator here is the TIMESTAMP: the server stamps the active turn's user
- * row with `pending_started_at`, which no earlier turn can share. Text equality
- * is still required, so a false match needs identical text AND a near-identical
- * timestamp.
+ * identical user turns, and matching on text would swallow the new one. The
+ * discriminator is therefore exact identity, never proximity: the active turn's
+ * row either carries the server-stamped `_active_turn_token` (stream_id +
+ * started_at — unique to this turn), or its timestamp equals `pending_started_at`
+ * within a precision-only epsilon that absorbs float/state.db drift but never a
+ * full second. A whole-second (or sub-second) mismatch is ambiguous and returns
+ * null so the caller materializes the pending turn — the transient duplicate is
+ * harmless, hiding a turn + moving its attachments is not. Text equality is
+ * still required downstream, so a false match needs identical text AND an exact
+ * identity signal.
  */
 function _pendingActiveTurnUserMessage(messages, session){
   const startedAt=Number(session?.pending_started_at);
@@ -10416,10 +10445,18 @@ function _pendingActiveTurnUserMessage(messages, session){
     const msg=list[i];
     if(!msg||String(msg.role||'')!=='user') continue;
     if(typeof _isContextCompactionMessage==='function'&&_isContextCompactionMessage(msg)) continue;
+    // Unambiguous: the row carries the active turn's exact token
+    // (stream_id + started_at) stamped by the server's eager-checkpoint path.
+    if(typeof _activeTurnTokenMatches==='function'&&_activeTurnTokenMatches(msg,session)) return msg;
+    // Unambiguous: the row's timestamp IS pending_started_at within
+    // precision-only float drift (never a whole second).
     const ts=_messageTimestampSeconds(msg);
     if(ts===null) continue;
-    if(Math.abs(ts-startedAt)<=_PENDING_ACTIVE_TURN_TS_TOLERANCE) return msg;
+    if(Math.abs(ts-startedAt)<=_PENDING_ACTIVE_TURN_TS_EPSILON) return msg;
   }
+  // Any wider drift (whole-second truncation, a rapid repeat ~1s later) is
+  // ambiguous: return null so getPendingSessionMessage() materializes the
+  // pending turn rather than guessing.
   return null;
 }
 

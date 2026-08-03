@@ -212,6 +212,7 @@ def _run_pending_session_message_probe() -> dict:
             _function_body(SESSIONS_SRC, "function _sameTranscriptMessage"),
             _function_body(UI_SRC, "function _pendingCurrentTailUserMessage"),
             _optional_function_body(UI_SRC, "function _messageTimestampSeconds"),
+            _optional_function_body(UI_SRC, "function _activeTurnTokenMatches"),
             _optional_function_body(UI_SRC, "function _pendingActiveTurnUserMessage"),
             _function_body(UI_SRC, "function _isContextCompactionText"),
             _function_body(UI_SRC, "function _isContextCompactionMessage"),
@@ -219,7 +220,7 @@ def _run_pending_session_message_probe() -> dict:
         ]
     )
     script = f"""
-const _PENDING_ACTIVE_TURN_TS_TOLERANCE=1.5;
+const _PENDING_ACTIVE_TURN_TS_EPSILON=1e-6;
 {helpers}
 const prompt = {json.dumps(prompt)};
 const historical = {{role:'user', content:prompt, _ts:1}};
@@ -331,6 +332,32 @@ const noStartedAtResult = getPendingSessionMessage(
   midRunTranscript
 );
 
+// Regression (review round 2): two completed identical-text turns whose
+// started_at differ by ~1s. The old 1.5s tolerance adopted the EARLIER row as
+// the "active turn", hiding the second (still-pending) turn and copying its
+// attachments onto the old row. With the precision-only epsilon the second turn
+// is materialized and the first row stays untouched.
+const rapidRepeatTurnOne = {{role:'user', content:prompt, timestamp:100}};
+const rapidRepeatAnswerOne = {{role:'assistant', content:'done', timestamp:101}};
+const rapidRepeatSecondAttachments = [{{name:'second.txt', path:'second.txt', mime:'text/plain'}}];
+const rapidRepeatResult = getPendingSessionMessage(
+  {{pending_user_message:prompt, pending_started_at:101, pending_attachments:rapidRepeatSecondAttachments}},
+  [rapidRepeatTurnOne, rapidRepeatAnswerOne]
+);
+// Exact token identity: the eager-checkpoint row carries _active_turn_token
+// built from the same stream_id + started_at as the session — adopted even
+// though its timestamp (499.9) is NOT within the epsilon of pending_started_at.
+const tokenIdentityTranscript = [
+  {{role:'user', content:'earlier question', timestamp:100}},
+  {{role:'assistant', content:'earlier answer', timestamp:200}},
+  {{role:'user', content:prompt, timestamp:499.9, _active_turn_token:'stream-abc:500'}},
+  {{role:'assistant', content:'partial', timestamp:560}},
+];
+const tokenIdentityResult = getPendingSessionMessage(
+  {{pending_user_message:prompt, pending_started_at:midRunStartedAt, active_stream_id:'stream-abc'}},
+  tokenIdentityTranscript
+);
+
 process.stdout.write(JSON.stringify({{
   historicalSameTextSurvives: !!fromHistoricalSameText && fromHistoricalSameText.content===prompt && fromHistoricalSameText._pending===true,
   historicalWorkspaceSurvives: !!fromHistoricalWorkspace && fromHistoricalWorkspace.content===prompt && fromHistoricalWorkspace._pending===true,
@@ -347,6 +374,9 @@ process.stdout.write(JSON.stringify({{
   midRunWorkspaceReloadDedupe: midRunWorkspaceResult===null,
   staleSameTextStillMaterializes: !!staleSameTextResult && staleSameTextResult._pending===true,
   legacyNoStartedAtStillMaterializes: !!noStartedAtResult && noStartedAtResult._pending===true,
+  rapidRepeatSecondTurnReturned: !!rapidRepeatResult && rapidRepeatResult._pending===true && rapidRepeatResult.content===prompt && Array.isArray(rapidRepeatResult.attachments) && rapidRepeatResult.attachments[0].name==='second.txt',
+  rapidRepeatFirstRowKeptClean: !Array.isArray(rapidRepeatTurnOne.attachments),
+  tokenIdentityDedupe: tokenIdentityResult===null,
   isContextCompactionText: _isContextCompactionText(compactionMarker.content),
   isContextCompactionMessage: _isContextCompactionMessage(compactionMarker),
 }}));
@@ -566,6 +596,11 @@ def test_get_pending_session_message_keeps_deferred_repeat_prompt_by_behavior():
     assert result["midRunWorkspaceReloadDedupe"] is True
     assert result["staleSameTextStillMaterializes"] is True
     assert result["legacyNoStartedAtStillMaterializes"] is True
+    # #6670 review round 2: ~1s-apart identical turns must not be collapsed by
+    # the active-turn fallback (no over-dedup, no attachment mis-attachment).
+    assert result["rapidRepeatSecondTurnReturned"] is True
+    assert result["rapidRepeatFirstRowKeptClean"] is True
+    assert result["tokenIdentityDedupe"] is True
     assert result["isContextCompactionText"] is True
     assert result["isContextCompactionMessage"] is True
 
