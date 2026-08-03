@@ -7262,6 +7262,8 @@ main.main.showing-portfolio > #mainPortfolio { display: flex; }
 .pf-table { width: 100%; border-collapse: collapse; font-size: 13px; }
 .pf-table th { padding: 8px 12px; text-align: left; font-weight: 600; font-size: 11px; color: var(--muted); text-transform: uppercase; letter-spacing: .04em; border-bottom: 1px solid var(--border); white-space: nowrap; }
 .pf-table td { padding: 9px 12px; border-bottom: 1px solid var(--border); color: var(--text); white-space: nowrap; }
+.pf-table th:first-child,
+.pf-table td:first-child { position: sticky; left: 0; z-index: 1; background: var(--bg); box-shadow: 1px 0 0 var(--border); }
 .pf-table tbody tr:hover { background: var(--hover-bg, rgba(128,128,128,.06)); }
 .pf-table .pf-num { text-align: right; font-variant-numeric: tabular-nums; }
 .pf-symbol { font-weight: 600; font-family: monospace; }
