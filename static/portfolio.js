@@ -1,29 +1,34 @@
 // portfolio.js — Portfolio panel logic
 
 const PORTFOLIO_MOCK_DATA = [
-  { symbol: 'AAPL',  name: 'Apple Inc.',            qty: 50,   cost: 165.20, price: 189.45, currency: 'USD' },
-  { symbol: 'MSFT',  name: 'Microsoft Corp.',        qty: 30,   cost: 280.50, price: 415.20, currency: 'USD' },
-  { symbol: 'NVDA',  name: 'NVIDIA Corp.',            qty: 20,   cost: 450.00, price: 875.30, currency: 'USD' },
-  { symbol: 'GOOGL', name: 'Alphabet Inc.',           qty: 15,   cost: 130.00, price: 178.90, currency: 'USD' },
-  { symbol: 'AMZN',  name: 'Amazon.com Inc.',         qty: 25,   cost: 175.00, price: 196.60, currency: 'USD' },
-  { symbol: 'BRK.B', name: 'Berkshire Hathaway B',    qty: 40,   cost: 340.00, price: 415.70, currency: 'USD' },
-  { symbol: 'TSM',   name: 'Taiwan Semiconductor',    qty: 60,   cost: 100.00, price: 165.80, currency: 'USD' },
-  { symbol: '0700.HK', name: 'Tencent Holdings',      qty: 200,  cost: 290.00, price: 380.20, currency: 'HKD' },
+  { symbol: 'AAPL',    name: 'Apple Inc.',           qty: 50,  cost: 165.20, price: 189.45, currency: 'USD', usd_fx: 1    },
+  { symbol: 'MSFT',    name: 'Microsoft Corp.',       qty: 30,  cost: 280.50, price: 415.20, currency: 'USD', usd_fx: 1    },
+  { symbol: 'NVDA',    name: 'NVIDIA Corp.',          qty: 20,  cost: 450.00, price: 875.30, currency: 'USD', usd_fx: 1    },
+  { symbol: 'GOOGL',   name: 'Alphabet Inc.',         qty: 15,  cost: 130.00, price: 178.90, currency: 'USD', usd_fx: 1    },
+  { symbol: 'AMZN',    name: 'Amazon.com Inc.',       qty: 25,  cost: 175.00, price: 196.60, currency: 'USD', usd_fx: 1    },
+  { symbol: 'BRK.B',   name: 'Berkshire Hathaway B',  qty: 40,  cost: 340.00, price: 415.70, currency: 'USD', usd_fx: 1    },
+  { symbol: 'TSM',     name: 'Taiwan Semiconductor',  qty: 60,  cost: 100.00, price: 165.80, currency: 'USD', usd_fx: 1    },
+  { symbol: '0700.HK', name: 'Tencent Holdings',      qty: 200, cost: 290.00, price: 380.20, currency: 'HKD', usd_fx: 7.78 },
 ];
 
 function _calcPortfolioRows(holdings) {
   let totalUsdValue = 0;
+  let totalUsdCost  = 0;
   const rows = holdings.map(h => {
     const fx          = h.usd_fx > 0 ? h.usd_fx : 1;
     const marketValue = h.qty * h.price;
     const usdValue    = marketValue / fx;
     const costBasis   = h.qty * h.cost;
+    const usdCost     = costBasis / fx;
     const pnl         = marketValue - costBasis;
     const pnlPct      = costBasis > 0 ? (pnl / costBasis) * 100 : 0;
     totalUsdValue += usdValue;
-    return { ...h, marketValue, usdValue, costBasis, pnl, pnlPct };
+    totalUsdCost  += usdCost;
+    return { ...h, marketValue, usdValue, costBasis, usdCost, pnl, pnlPct };
   });
-  return { rows, totalUsdValue };
+  const totalUsdPnl    = totalUsdValue - totalUsdCost;
+  const totalUsdPnlPct = totalUsdCost > 0 ? (totalUsdPnl / totalUsdCost) * 100 : 0;
+  return { rows, totalUsdValue, totalUsdPnl, totalUsdPnlPct };
 }
 
 function _fmt(n, decimals = 2) {
@@ -38,7 +43,7 @@ function renderPortfolioTable(holdings) {
   const container = document.getElementById('portfolioContainer');
   if (!container) return;
 
-  const { rows, totalUsdValue } = _calcPortfolioRows(holdings);
+  const { rows, totalUsdValue, totalUsdPnl, totalUsdPnlPct } = _calcPortfolioRows(holdings);
 
   const rowsWithWeight = rows
     .map(r => ({ ...r, weight: totalUsdValue > 0 ? (r.usdValue / totalUsdValue) * 100 : 0 }))
@@ -67,6 +72,9 @@ function renderPortfolioTable(holdings) {
     <div class="pf-summary">
       <span class="pf-summary-label">Total Market Value (USD)</span>
       <span class="pf-summary-value">$${_fmt(totalUsdValue)}</span>
+      <span class="pf-summary-label" style="margin-left:16px">P&amp;L (USD)</span>
+      <span class="pf-summary-value ${_pnlClass(totalUsdPnl)}">${totalUsdPnl >= 0 ? '+' : ''}$${_fmt(totalUsdPnl)}</span>
+      <span class="pf-summary-value ${_pnlClass(totalUsdPnlPct)}" style="font-size:14px">(${totalUsdPnlPct >= 0 ? '+' : ''}${_fmt(totalUsdPnlPct)}%)</span>
     </div>
     <div class="pf-table-wrap">
       <table class="pf-table">
