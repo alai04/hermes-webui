@@ -97,6 +97,19 @@ def test_is_dirty_preserves_legacy_empty_failure_contract(tmp_path, monkeypatch)
 
 @pytest.mark.parametrize(
     'probe_output',
+    ['git exited with status 2', 'git exited with status 128'],
+)
+def test_is_dirty_legacy_broad_status_contract(tmp_path, monkeypatch, probe_output):
+    (tmp_path / '.git').mkdir()
+    monkeypatch.setattr(
+        updates, '_run_git', lambda *args, **kwargs: (probe_output, False),
+    )
+
+    assert updates._is_dirty(tmp_path) is True
+
+
+@pytest.mark.parametrize(
+    'probe_output',
     [
         'git exited with status 2',
         'git exited with status 128',
