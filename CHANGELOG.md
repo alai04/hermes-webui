@@ -21,6 +21,8 @@
 
 ### Fixed
 
+- **Inline HTML previews no longer show stale content after an edit.** The `/api/media` HTML response and the inline-preview `fetch()` used a 1-hour private cache, so an agent-edited HTML file kept showing the old render until a manual full-page refresh. HTML responses now send `Cache-Control: no-store` (non-HTML media keeps its `private, max-age=3600`) and the inline fetch passes `{cache:'no-store'}`, so a re-opened preview always reflects the current file. Thanks @happy5318. (#6706)
+
 - **CLI sessions (Claude Code, Codex) are readable again on named profiles.** External-agent transcripts scanned straight from `~/.claude/projects` / `~/.codex/` carry no Hermes profile (`profile: None`), so once the active profile was a named (non-root) one, the detail-load profile gate 404'd every one of them — the row showed in the sidebar and then rendered "Session not available in web UI." when clicked. These profile-less external-agent rows are now exempted from the visibility gate so they open identically on root and named profiles; every state.db-backed row (CLI/messaging/cron) that *does* carry a profile stays fully scoped. Thanks @kk17. (#6690)
 
 - **Workspace artifact links with Windows backslash paths now open.** `openArtifactPath()` / `_workspacePathExists()` split on `/`, so a Windows absolute artifact path like `D:\workspace\dir\file` never matched the workspace-prefix strip and was treated as a single filename — `/api/list` never resolved it and the click reported "cannot open file." Both the path and the session workspace are now normalized to `/` separators before the prefix strip and existence check; POSIX paths are byte-identical to before. Thanks @fatbee0808. (#6763)
