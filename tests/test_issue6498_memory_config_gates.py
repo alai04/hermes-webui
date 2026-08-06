@@ -7,7 +7,6 @@ process-global cache race across profiles.
 """
 import io
 import json
-import pathlib
 from unittest.mock import MagicMock
 
 import pytest
