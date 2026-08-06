@@ -243,8 +243,10 @@ def test_hermes_ext_register_runtime_identity_and_reload_lifecycle():
         const deferred = window.hermesExt.register('deferred.ext');
         assert.ok(deferred);
         assert.deepStrictEqual(deferred.settings.values, {{enabled: false, mode: 'deferred'}});
+        assert.strictEqual(deferred.settings.trusted, true);
         assert.strictEqual(deferred.storage.set('note', 'deferred-note'), true);
         assert.strictEqual(deferred.storage.get('note'), 'deferred-note');
+        assert.strictEqual(window.hermesExt.settings.forExtension('deferred.ext').trusted, false);
 
         assert.strictEqual(window.hermesExt.register('alpha.ext'), alpha);
         assert.strictEqual(alpha.settings.get('enabled'), true);

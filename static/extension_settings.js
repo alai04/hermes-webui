@@ -232,6 +232,7 @@
   function settingsForExtension(id,metadata){
     const clean=extensionId(id);
     const meta=metadata||schemas.get(clean)||{id:clean,name:clean,storage_owned:false,settings_schema:[]};
+    const isTrusted=metadata?true:schemas.has(clean);
     const schema=supportsSettings(meta)?meta.settings_schema:[];
     const key=settingsKey(clean);
     function current(){
@@ -249,7 +250,7 @@
     }
     return {
       extensionId:clean,
-      trusted:schemas.has(clean),
+      trusted:isTrusted,
       storageOwned:!!meta.storage_owned,
       supported:supportsSettings(meta),
       schema,
