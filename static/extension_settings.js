@@ -6,6 +6,7 @@
   const FIELD_TYPES=new Set(['boolean','string','number','integer','enum']);
   const schemas=new Map();
   const trustedExtensions=new Map();
+  const registrations=new Map();
   let trustedSeeded=false;
 
   function extensionId(value){
@@ -309,6 +310,22 @@
     };
   }
 
+  function registerExtension(id){
+    if(typeof id!=='string') return null;
+    const clean=extensionId(id);
+    if(!clean) return null;
+    const existing=registrations.get(clean);
+    if(existing) return existing;
+    if(!schemas.has(clean)) return null;
+    const handle=Object.freeze({
+      id:clean,
+      settings:settingsForExtension(clean),
+      storage:storageForExtension(clean),
+    });
+    registrations.set(clean,handle);
+    return handle;
+  }
+
   const api={
     normalizeSchemas,
     primeFromStatus,
@@ -325,5 +342,6 @@
   window.hermesExt.storage=window.hermesExt.storage||{};
   window.hermesExt.settings.forExtension=settingsForExtension;
   window.hermesExt.storage.forExtension=storageForExtension;
+  window.hermesExt.register=registerExtension;
   primeFromStatus(window.__HERMES_EXTENSION_CONFIG__||{});
 })();
