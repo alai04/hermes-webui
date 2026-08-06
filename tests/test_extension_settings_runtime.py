@@ -164,6 +164,14 @@ def test_hermes_ext_register_runtime_identity_and_reload_lifecycle():
                 {{key: 'enabled', type: 'boolean', default: true}},
                 {{key: 'mode', type: 'string', default: 'beta'}}
               ]
+            }}, {{
+              id: 'deferred.ext',
+              name: 'Deferred',
+              storage_owned: true,
+              settings_schema: [
+                {{key: 'enabled', type: 'boolean', default: false}},
+                {{key: 'mode', type: 'string', default: 'deferred'}}
+              ]
             }}]
           }},
           localStorage: {{
@@ -231,6 +239,12 @@ def test_hermes_ext_register_runtime_identity_and_reload_lifecycle():
             settings_schema: [{{key: 'enabled', type: 'boolean', default: false}}]
           }}]
         }});
+
+        const deferred = window.hermesExt.register('deferred.ext');
+        assert.ok(deferred);
+        assert.deepStrictEqual(deferred.settings.values, {{enabled: false, mode: 'deferred'}});
+        assert.strictEqual(deferred.storage.set('note', 'deferred-note'), true);
+        assert.strictEqual(deferred.storage.get('note'), 'deferred-note');
 
         assert.strictEqual(window.hermesExt.register('alpha.ext'), alpha);
         assert.strictEqual(alpha.settings.get('enabled'), true);
