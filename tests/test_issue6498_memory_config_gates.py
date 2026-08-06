@@ -60,7 +60,7 @@ class TestMemoryReadConfigGates:
     def test_read_memory_disabled(self, mock_handler, fake_profile_home, monkeypatch):
         import api.routes as routes
 
-        monkeypatch.setattr(routes, "get_config_snapshot", lambda: {"memory_enabled": False})
+        monkeypatch.setattr(routes, "get_config_snapshot", lambda: {"memory": {"memory_enabled": False}})
 
         routes._handle_memory_read(mock_handler)
 
@@ -79,7 +79,7 @@ class TestMemoryReadConfigGates:
     def test_read_user_profile_disabled(self, mock_handler, fake_profile_home, monkeypatch):
         import api.routes as routes
 
-        monkeypatch.setattr(routes, "get_config_snapshot", lambda: {"user_profile_enabled": False})
+        monkeypatch.setattr(routes, "get_config_snapshot", lambda: {"memory": {"user_profile_enabled": False}})
 
         routes._handle_memory_read(mock_handler)
 
@@ -99,7 +99,7 @@ class TestMemoryReadConfigGates:
         monkeypatch.setattr(
             routes,
             "get_config_snapshot",
-            lambda: {"memory_enabled": False, "user_profile_enabled": False},
+            lambda: {"memory": {"memory_enabled": False, "user_profile_enabled": False}},
         )
 
         routes._handle_memory_read(mock_handler)
@@ -129,6 +129,20 @@ class TestMemoryReadConfigGates:
         assert body["user"] == "This is my user profile"
         assert body["soul"] == "This is my soul"
 
+    def test_read_default_true_when_memory_mapping_malformed(self, mock_handler, fake_profile_home, monkeypatch):
+        """A non-dict `memory` mapping (e.g. a string) must also default to True."""
+        import api.routes as routes
+
+        monkeypatch.setattr(routes, "get_config_snapshot", lambda: {"memory": "not-a-dict"})
+
+        routes._handle_memory_read(mock_handler)
+
+        assert mock_handler.status == 200
+        body = _body_from_handler(mock_handler)
+        assert body["memory"] == "This is my memory content"
+        assert body["user"] == "This is my user profile"
+        assert body["soul"] == "This is my soul"
+
     def test_read_soul_unaffected_by_disabled_flags(self, mock_handler, fake_profile_home, monkeypatch):
         """Soul section is unaffected by both flags."""
         import api.routes as routes
@@ -136,7 +150,7 @@ class TestMemoryReadConfigGates:
         monkeypatch.setattr(
             routes,
             "get_config_snapshot",
-            lambda: {"memory_enabled": False, "user_profile_enabled": False},
+            lambda: {"memory": {"memory_enabled": False, "user_profile_enabled": False}},
         )
 
         routes._handle_memory_read(mock_handler)
@@ -153,7 +167,7 @@ class TestMemoryWriteConfigGates:
     def test_write_memory_disabled(self, mock_handler, fake_profile_home, monkeypatch):
         import api.routes as routes
 
-        monkeypatch.setattr(routes, "get_config_snapshot", lambda: {"memory_enabled": False})
+        monkeypatch.setattr(routes, "get_config_snapshot", lambda: {"memory": {"memory_enabled": False}})
 
         routes._handle_memory_write(mock_handler, {"section": "memory", "content": "new content"})
 
@@ -164,7 +178,7 @@ class TestMemoryWriteConfigGates:
     def test_write_user_profile_disabled(self, mock_handler, fake_profile_home, monkeypatch):
         import api.routes as routes
 
-        monkeypatch.setattr(routes, "get_config_snapshot", lambda: {"user_profile_enabled": False})
+        monkeypatch.setattr(routes, "get_config_snapshot", lambda: {"memory": {"user_profile_enabled": False}})
 
         routes._handle_memory_write(mock_handler, {"section": "user", "content": "new profile"})
 
@@ -179,7 +193,7 @@ class TestMemoryWriteConfigGates:
         monkeypatch.setattr(
             routes,
             "get_config_snapshot",
-            lambda: {"memory_enabled": False, "user_profile_enabled": False},
+            lambda: {"memory": {"memory_enabled": False, "user_profile_enabled": False}},
         )
 
         soul_path = fake_profile_home / "SOUL.md"
@@ -199,7 +213,7 @@ class TestMemoryWriteConfigGates:
         monkeypatch.setattr(
             routes,
             "get_config_snapshot",
-            lambda: {"memory_enabled": True, "user_profile_enabled": True},
+            lambda: {"memory": {"memory_enabled": True, "user_profile_enabled": True}},
         )
 
         # Write memory
@@ -227,7 +241,7 @@ class TestProfileIsolation:
         """
         import api.routes as routes
 
-        mock_snapshot = {"memory_enabled": False, "user_profile_enabled": True}
+        mock_snapshot = {"memory": {"memory_enabled": False, "user_profile_enabled": True}}
         call_count = {"n": 0}
 
         def counting_snapshot():
@@ -235,7 +249,7 @@ class TestProfileIsolation:
             if call_count["n"] == 1:
                 return dict(mock_snapshot)  # profile A
             else:
-                return {"memory_enabled": True, "user_profile_enabled": True}  # profile B
+                return {"memory": {"memory_enabled": True, "user_profile_enabled": True}}  # profile B
 
         monkeypatch.setattr(routes, "get_config_snapshot", counting_snapshot)
 
@@ -275,9 +289,9 @@ class TestProfileIsolation:
             """Return profile A config first, profile B config second (simulating reload)."""
             snapshot_call["count"] += 1
             if snapshot_call["count"] == 1:
-                return {"memory_enabled": False, "user_profile_enabled": True}
+                return {"memory": {"memory_enabled": False, "user_profile_enabled": True}}
             else:
-                return {"memory_enabled": True, "user_profile_enabled": True}
+                return {"memory": {"memory_enabled": True, "user_profile_enabled": True}}
 
         monkeypatch.setattr(routes, "get_config_snapshot", per_profile_snapshot)
         monkeypatch.setattr("api.profiles.get_active_hermes_home", lambda: profile_a_home)
@@ -365,8 +379,8 @@ class TestCrossProfileForcedReload:
         calls = self._install_race(
             monkeypatch,
             routes,
-            a_cfg={"memory_enabled": False, "user_profile_enabled": True},
-            b_cfg={"memory_enabled": True, "user_profile_enabled": True},
+            a_cfg={"memory": {"memory_enabled": False, "user_profile_enabled": True}},
+            b_cfg={"memory": {"memory_enabled": True, "user_profile_enabled": True}},
         )
 
         h = self._handler()
@@ -399,8 +413,8 @@ class TestCrossProfileForcedReload:
         calls = self._install_race(
             monkeypatch,
             routes,
-            a_cfg={"memory_enabled": True, "user_profile_enabled": False},
-            b_cfg={"memory_enabled": True, "user_profile_enabled": True},
+            a_cfg={"memory": {"memory_enabled": True, "user_profile_enabled": False}},
+            b_cfg={"memory": {"memory_enabled": True, "user_profile_enabled": True}},
         )
 
         h = self._handler()
@@ -428,8 +442,8 @@ class TestCrossProfileForcedReload:
         calls = self._install_race(
             monkeypatch,
             routes,
-            a_cfg={"memory_enabled": True, "user_profile_enabled": True},
-            b_cfg={"memory_enabled": False, "user_profile_enabled": False},
+            a_cfg={"memory": {"memory_enabled": True, "user_profile_enabled": True}},
+            b_cfg={"memory": {"memory_enabled": False, "user_profile_enabled": False}},
         )
 
         h = self._handler()
@@ -456,8 +470,8 @@ class TestCrossProfileForcedReload:
         calls = self._install_race(
             monkeypatch,
             routes,
-            a_cfg={"memory_enabled": False, "user_profile_enabled": True},
-            b_cfg={"memory_enabled": True, "user_profile_enabled": True},
+            a_cfg={"memory": {"memory_enabled": False, "user_profile_enabled": True}},
+            b_cfg={"memory": {"memory_enabled": True, "user_profile_enabled": True}},
         )
 
         h = self._handler()
@@ -481,8 +495,8 @@ class TestCrossProfileForcedReload:
         calls = self._install_race(
             monkeypatch,
             routes,
-            a_cfg={"memory_enabled": True, "user_profile_enabled": False},
-            b_cfg={"memory_enabled": True, "user_profile_enabled": True},
+            a_cfg={"memory": {"memory_enabled": True, "user_profile_enabled": False}},
+            b_cfg={"memory": {"memory_enabled": True, "user_profile_enabled": True}},
         )
 
         h = self._handler()
@@ -506,8 +520,8 @@ class TestCrossProfileForcedReload:
         calls = self._install_race(
             monkeypatch,
             routes,
-            a_cfg={"memory_enabled": True, "user_profile_enabled": True},
-            b_cfg={"memory_enabled": False, "user_profile_enabled": True},
+            a_cfg={"memory": {"memory_enabled": True, "user_profile_enabled": True}},
+            b_cfg={"memory": {"memory_enabled": False, "user_profile_enabled": True}},
         )
 
         h = self._handler()
@@ -516,4 +530,77 @@ class TestCrossProfileForcedReload:
         assert h.status == 200
         assert mem_file.read_text(encoding="utf-8") == "new content"
         assert calls["snapshot"] == 1
+
+
+class TestRealLoaderNestedConfig:
+    """The gates must read the REAL nested cfg['memory'] flags via the real
+    config loader — a config.yaml with ``memory: {memory_enabled: false}`` must
+    blank the read and deny the write (403) without creating ``memories/``.
+    """
+
+    _DISABLED_YAML = (
+        "memory:\n"
+        "  memory_enabled: false\n"
+        "  user_profile_enabled: false\n"
+    )
+
+    def test_real_loader_disabled_read_blank_and_write_403_no_mkdir(
+        self, monkeypatch, tmp_path, mock_handler
+    ):
+        import api.config as config
+        import api.routes as routes
+
+        # Real profile home with private memory files and a real config.yaml
+        # using the nested ``memory`` section (Hermes Agent's schema).
+        home = tmp_path / "profile_home"
+        (home / "memories").mkdir(parents=True)
+        (home / "memories" / "MEMORY.md").write_text("private memory", encoding="utf-8")
+        (home / "memories" / "USER.md").write_text("private user", encoding="utf-8")
+        (home / "SOUL.md").write_text("soul", encoding="utf-8")
+        config_path = home / "config.yaml"
+        config_path.write_text(self._DISABLED_YAML, encoding="utf-8")
+
+        # Load through the real loader: point _get_config_path at the temp
+        # config.yaml and force a reload so the process cache is parsed from it.
+        monkeypatch.setattr(config, "_get_config_path", lambda: config_path)
+        config.reload_config()
+        monkeypatch.setattr("api.profiles.get_active_hermes_home", lambda: home)
+
+        routes._handle_memory_read(mock_handler)
+
+        assert mock_handler.status == 200
+        body = _body_from_handler(mock_handler)
+        # Disabled read: existing private files must come back blank.
+        assert body["memory"] == ""
+        assert body["memory_path"] == ""
+        assert body["memory_mtime"] is None
+        assert body["user"] == ""
+        assert body["user_path"] == ""
+        assert body["user_mtime"] is None
+        # SOUL is unaffected.
+        assert body["soul"] == "soul"
+
+        # Disabled write: 403 and memories/ must NOT be created.
+        write_home = tmp_path / "write_home"
+        write_home.mkdir()
+        write_config = write_home / "config.yaml"
+        write_config.write_text(self._DISABLED_YAML, encoding="utf-8")
+        monkeypatch.setattr(config, "_get_config_path", lambda: write_config)
+        monkeypatch.setattr("api.profiles.get_active_hermes_home", lambda: write_home)
+        config.reload_config()
+
+        h2 = MagicMock()
+        h2.wfile = io.BytesIO()
+        h2.send_response = lambda s: setattr(h2, "status", s)
+        h2.send_header = lambda k, v: None
+        h2.end_headers = MagicMock()
+
+        routes._handle_memory_write(h2, {"section": "memory", "content": "should be blocked"})
+
+        assert h2.status == 403
+        body = _body_from_handler(h2)
+        assert "disabled" in body.get("error", "").lower()
+        assert not (write_home / "memories").exists(), (
+            "memories/ must not be created when memory is disabled"
+        )
 

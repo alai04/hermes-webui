@@ -20663,9 +20663,12 @@ def _handle_memory_read(handler, parsed=None):
     # Respect memory_enabled and user_profile_enabled config flags (#6406)
     # Use get_config_snapshot() for per-profile isolation — get_config() returns
     # the process-global mutable _cfg_cache which races across profiles.
+    # The flags are nested under cfg["memory"] in Hermes Agent's schema.
     cfg = get_config_snapshot()
-    memory_enabled = _webui_truthy(cfg.get("memory_enabled", True)) if isinstance(cfg, dict) else True
-    user_profile_enabled = _webui_truthy(cfg.get("user_profile_enabled", True)) if isinstance(cfg, dict) else True
+    mem = cfg.get("memory") if isinstance(cfg, dict) else None
+    mem_cfg = mem if isinstance(mem, dict) else {}
+    memory_enabled = _webui_truthy(mem_cfg.get("memory_enabled", True))
+    user_profile_enabled = _webui_truthy(mem_cfg.get("user_profile_enabled", True))
 
     mem_file = mem_dir / "MEMORY.md" if memory_enabled else None
     user_file = mem_dir / "USER.md" if user_profile_enabled else None
@@ -25767,14 +25770,15 @@ def _handle_memory_write(handler, body):
     # Respect memory_enabled and user_profile_enabled config flags (#6406)
     # Use get_config_snapshot() for per-profile isolation — get_config() returns
     # the process-global mutable _cfg_cache which races across profiles.
+    # The flags are nested under cfg["memory"] in Hermes Agent's schema.
     cfg = get_config_snapshot()
+    mem = cfg.get("memory") if isinstance(cfg, dict) else None
+    mem_cfg = mem if isinstance(mem, dict) else {}
     if section == "memory":
-        memory_enabled = _webui_truthy(cfg.get("memory_enabled", True)) if isinstance(cfg, dict) else True
-        if not memory_enabled:
+        if not _webui_truthy(mem_cfg.get("memory_enabled", True)):
             return bad(handler, "Memory is disabled by configuration (memory_enabled: false)", 403)
     elif section == "user":
-        user_profile_enabled = _webui_truthy(cfg.get("user_profile_enabled", True)) if isinstance(cfg, dict) else True
-        if not user_profile_enabled:
+        if not _webui_truthy(mem_cfg.get("user_profile_enabled", True)):
             return bad(handler, "User profile is disabled by configuration (user_profile_enabled: false)", 403)
 
     try:
