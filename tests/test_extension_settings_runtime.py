@@ -182,6 +182,24 @@ def test_hermes_ext_register_runtime_identity_and_reload_lifecycle():
         }};
         eval(fs.readFileSync({str(EXTENSION_SETTINGS_JS)!r}, 'utf8'));
 
+        const forgedMetadata = {{
+          id: 'forged.ext',
+          name: 'Forged',
+          storage_owned: true,
+          settings_schema: [{{key: 'owned', type: 'boolean', default: false}}]
+        }};
+        const forgedSettings = window.HermesExtensionSettings.settingsForExtension(
+          'forged.ext', forgedMetadata
+        );
+        const forgedStorage = window.HermesExtensionSettings.storageForExtension(
+          'forged.ext', forgedMetadata
+        );
+        assert.strictEqual(forgedSettings.trusted, false);
+        assert.strictEqual(forgedSettings.set('owned', true).ok, false);
+        assert.strictEqual(forgedStorage.set('owned', true), false);
+        assert.strictEqual(store.has('hermes.ext.settings.forged.ext'), false);
+        assert.strictEqual(store.has('hermes.ext.storage.forged.ext'), false);
+
         const beforeUnknown = {{reads, writes, removes}};
         assert.strictEqual(window.hermesExt.register(''), null);
         assert.strictEqual(window.hermesExt.register('   unknown.ext   '), null);

@@ -229,10 +229,7 @@
     return !!(meta&&meta.storage_owned&&Array.isArray(meta.settings_schema)&&meta.settings_schema.length);
   }
 
-  function settingsForExtension(id,metadata){
-    const clean=extensionId(id);
-    const meta=metadata||schemas.get(clean)||{id:clean,name:clean,storage_owned:false,settings_schema:[]};
-    const isTrusted=metadata?true:schemas.has(clean);
+  function settingsAccessor(clean,meta,isTrusted){
     const schema=supportsSettings(meta)?meta.settings_schema:[];
     const key=settingsKey(clean);
     function current(){
@@ -279,9 +276,13 @@
     };
   }
 
-  function storageForExtension(id,metadata){
+  function settingsForExtension(id){
     const clean=extensionId(id);
-    const meta=metadata||schemas.get(clean)||{id:clean,name:clean,storage_owned:false,settings_schema:[]};
+    const meta=schemas.get(clean)||{id:clean,name:clean,storage_owned:false,settings_schema:[]};
+    return settingsAccessor(clean,meta,schemas.has(clean));
+  }
+
+  function storageAccessor(clean,meta){
     const allowed=!!meta.storage_owned;
     const key=storageKey(clean);
     return {
@@ -311,6 +312,12 @@
     };
   }
 
+  function storageForExtension(id){
+    const clean=extensionId(id);
+    const meta=schemas.get(clean)||{id:clean,name:clean,storage_owned:false,settings_schema:[]};
+    return storageAccessor(clean,meta);
+  }
+
   function registerExtension(id){
     if(typeof id!=='string') return null;
     const clean=extensionId(id);
@@ -321,8 +328,8 @@
     if(!trusted) return null;
     const handle=Object.freeze({
       id:clean,
-      settings:settingsForExtension(clean,trusted),
-      storage:storageForExtension(clean,trusted),
+      settings:settingsAccessor(clean,trusted,true),
+      storage:storageAccessor(clean,trusted),
     });
     registrations.set(clean,handle);
     return handle;
