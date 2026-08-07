@@ -17,8 +17,6 @@ showed just the single ``model`` field instead of the full catalog.
 import sys
 import types
 
-import pytest
-
 
 def _install_fake_hermes_cli(monkeypatch):
     """Stub hermes_cli modules so tests are deterministic and offline."""
