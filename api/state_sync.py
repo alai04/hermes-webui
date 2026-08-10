@@ -195,3 +195,29 @@ def sync_session_usage(session_id: str, input_tokens: int=0, output_tokens: int=
             db.close()
         except Exception:
             logger.debug("Failed to close state.db")
+
+
+def sync_session_title(session_id: str, title: str, profile: Optional[str] = None) -> None:
+    """Sync a generated title to state.db unconditionally (not gated by sync_to_insights).
+
+    Background title generation writes the title to the WebUI sidecar JSON but
+    not to hermes-agent's state.db, so ``hermes sessions list`` shows blank
+    titles for WebUI sessions.  This function bridges that gap and is called
+    from the background title update/refresh paths after a title is persisted.
+    """
+    if not title:
+        return
+    db = _get_state_db(profile=profile)
+    if not db:
+        return
+    try:
+        # Ensure the session row exists (idempotent) so the UPDATE has a target.
+        db.ensure_session(session_id=session_id, source='webui')
+        db.set_session_title(session_id, title)
+    except Exception:
+        logger.debug("Failed to sync session title to state.db for %s", session_id)
+    finally:
+        try:
+            db.close()
+        except Exception:
+            logger.debug("Failed to close state.db")
