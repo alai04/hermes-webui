@@ -55,7 +55,7 @@ def routes():
 def test_serve_file_bytes_emits_weak_etag(routes, tmp_path):
     target = tmp_path / "img.png"
     target.write_bytes(b"\x89PNG\r\n\x1a\npayload")
-    handler, _ = _serve(routes, target, "image/png", "no-cache")
+    handler, _ = _serve(routes, target, "image/png", "private, no-cache")
 
     assert handler.status == 200
     assert handler.body == b"\x89PNG\r\n\x1a\npayload"
@@ -67,24 +67,26 @@ def test_serve_file_bytes_emits_weak_etag(routes, tmp_path):
 def test_if_none_match_matching_returns_304_no_body(routes, tmp_path):
     target = tmp_path / "img.png"
     target.write_bytes(b"abc")
-    handler, _ = _serve(routes, target, "image/png", "no-cache")
+    handler, _ = _serve(routes, target, "image/png", "private, no-cache")
     etag = handler.header("ETag")
     assert handler.status == 200
 
     handler2, _ = _serve(
-        routes, target, "image/png", "no-cache", headers={"If-None-Match": etag}
+        routes, target, "image/png", "private, no-cache", headers={"If-None-Match": etag}
     )
     assert handler2.status == 304
     assert handler2.body == b""
     assert handler2.header("ETag") == etag
-    assert handler2.header("Cache-Control") == "no-cache"
+    assert handler2.header("Cache-Control") == "private, no-cache"
+    # RFC 9110 §15.4.5: a 304 must not carry Content-Length.
+    assert not any(k == "Content-Length" for k, _ in handler2.sent_headers)
 
 
 def test_if_none_match_star_returns_304(routes, tmp_path):
     target = tmp_path / "img.png"
     target.write_bytes(b"abc")
     handler, _ = _serve(
-        routes, target, "image/png", "no-cache", headers={"If-None-Match": "*"}
+        routes, target, "image/png", "private, no-cache", headers={"If-None-Match": "*"}
     )
     assert handler.status == 304
 
@@ -96,7 +98,7 @@ def test_if_none_match_mismatch_returns_full_200(routes, tmp_path):
         routes,
         target,
         "image/png",
-        "no-cache",
+        "private, no-cache",
         headers={"If-None-Match": 'W/"1-1"'},
     )
     assert handler.status == 200
@@ -107,10 +109,10 @@ def test_if_none_match_weak_comparison_ignores_w_prefix(routes, tmp_path):
     """RFC 7232 weak comparison: client may send the strong form (no W/)."""
     target = tmp_path / "img.png"
     target.write_bytes(b"abc")
-    handler, _ = _serve(routes, target, "image/png", "no-cache")
-    strong_form = handler.header("ETag")[2:]  # strip W/ -> '"<mtime>-<size>"'
+    handler, _ = _serve(routes, target, "image/png", "private, no-cache")
+    strong_form = handler.header("ETag")[2:]  # strip W/ -> '"<digest>"'
     handler2, _ = _serve(
-        routes, target, "image/png", "no-cache", headers={"If-None-Match": strong_form}
+        routes, target, "image/png", "private, no-cache", headers={"If-None-Match": strong_form}
     )
     assert handler2.status == 304
 
@@ -118,13 +120,13 @@ def test_if_none_match_weak_comparison_ignores_w_prefix(routes, tmp_path):
 def test_if_none_match_list_any_entry_matches(routes, tmp_path):
     target = tmp_path / "img.png"
     target.write_bytes(b"abc")
-    handler, _ = _serve(routes, target, "image/png", "no-cache")
+    handler, _ = _serve(routes, target, "image/png", "private, no-cache")
     etag = handler.header("ETag")
     handler2, _ = _serve(
         routes,
         target,
         "image/png",
-        "no-cache",
+        "private, no-cache",
         headers={"If-None-Match": f'W/"0-0", {etag}, W/"2-2"'},
     )
     assert handler2.status == 304
@@ -134,24 +136,67 @@ def test_etag_changes_when_file_replaced_in_place(routes, tmp_path):
     """Core user scenario: same-name file updated -> old ETag no longer valid."""
     target = tmp_path / "img.png"
     target.write_bytes(b"v1")
-    handler, _ = _serve(routes, target, "image/png", "no-cache")
+    handler, _ = _serve(routes, target, "image/png", "private, no-cache")
     old_etag = handler.header("ETag")
 
     time.sleep(0.01)  # ensure mtime_ns advances
     target.write_bytes(b"v2-content")
     handler2, _ = _serve(
-        routes, target, "image/png", "no-cache", headers={"If-None-Match": old_etag}
+        routes, target, "image/png", "private, no-cache", headers={"If-None-Match": old_etag}
     )
     assert handler2.status == 200
     assert handler2.body == b"v2-content"
     assert handler2.header("ETag") != old_etag
 
 
+def test_etag_changes_on_same_size_same_mtime_replacement(routes, tmp_path):
+    """Regression for the metadata-only ETag gap: an in-place replacement with
+    identical size AND identical mtime (e.g. 2-second filesystem granularity)
+    must still produce a different ETag, so the conditional GET returns 200
+    with the new content instead of a stale 304."""
+    target = tmp_path / "img.png"
+    target.write_bytes(b"AAAA")
+    fixed_ns = 1_700_000_000_000_000_000
+    os.utime(target, ns=(fixed_ns, fixed_ns))
+    handler, _ = _serve(routes, target, "image/png", "private, no-cache")
+    old_etag = handler.header("ETag")
+    assert handler.status == 200
+    assert handler.body == b"AAAA"
+
+    # Same byte length, same mtime to the nanosecond — only content differs.
+    target.write_bytes(b"BBBB")
+    os.utime(target, ns=(fixed_ns, fixed_ns))
+    handler2, _ = _serve(
+        routes, target, "image/png", "private, no-cache", headers={"If-None-Match": old_etag}
+    )
+    assert handler2.status == 200
+    assert handler2.body == b"BBBB"
+    assert handler2.header("ETag") != old_etag
+
+
+def test_304_path_closes_fd(routes, tmp_path, monkeypatch):
+    """The 304 early return must close the opened fd (no descriptor leak on
+    revalidated hits)."""
+    target = tmp_path / "img.png"
+    target.write_bytes(b"abc")
+    handler, _ = _serve(routes, target, "image/png", "private, no-cache")
+    etag = handler.header("ETag")
+
+    closed = []
+    real_close = os.close
+    monkeypatch.setattr("api.routes.os.close", lambda fd: (closed.append(fd), real_close(fd))[1])
+    handler2, _ = _serve(
+        routes, target, "image/png", "private, no-cache", headers={"If-None-Match": etag}
+    )
+    assert handler2.status == 304
+    assert closed, "fd was not closed on the 304 path"
+
+
 def test_range_response_includes_etag(routes, tmp_path):
     target = tmp_path / "img.png"
     target.write_bytes(b"0123456789")
     handler, _ = _serve(
-        routes, target, "image/png", "no-cache", headers={"Range": "bytes=0-2"}
+        routes, target, "image/png", "private, no-cache", headers={"Range": "bytes=0-2"}
     )
     assert handler.status == 206
     assert handler.body == b"012"
@@ -162,13 +207,13 @@ def test_if_none_match_precedes_range(routes, tmp_path):
     """A matched conditional request short-circuits before Range handling."""
     target = tmp_path / "img.png"
     target.write_bytes(b"0123456789")
-    handler, _ = _serve(routes, target, "image/png", "no-cache")
+    handler, _ = _serve(routes, target, "image/png", "private, no-cache")
     etag = handler.header("ETag")
     handler2, _ = _serve(
         routes,
         target,
         "image/png",
-        "no-cache",
+        "private, no-cache",
         headers={"If-None-Match": etag, "Range": "bytes=0-2"},
     )
     assert handler2.status == 304
@@ -178,7 +223,7 @@ def test_invalid_range_still_416(routes, tmp_path):
     target = tmp_path / "img.png"
     target.write_bytes(b"0123456789")
     handler, _ = _serve(
-        routes, target, "image/png", "no-cache", headers={"Range": "bytes=999-1000"}
+        routes, target, "image/png", "private, no-cache", headers={"Range": "bytes=999-1000"}
     )
     assert handler.status == 416
     assert handler.header("Content-Range") == "bytes */10"
@@ -201,7 +246,7 @@ def test_handle_media_image_served_with_no_cache_and_etag(routes, monkeypatch, t
     handler = _media_get(routes, monkeypatch, img)
 
     assert handler.status == 200
-    assert handler.header("Cache-Control") == "no-cache"
+    assert handler.header("Cache-Control") == "private, no-cache"
     assert handler.header("ETag") and handler.header("ETag").startswith('W/"')
     assert bytes(handler.body) == b"\x89PNG\r\n\x1a\nimagedata"
 
@@ -252,5 +297,5 @@ def test_handle_media_pdf_uses_no_cache(routes, monkeypatch, tmp_path):
     handler = _media_get(routes, monkeypatch, pdf)
 
     assert handler.status == 200
-    assert handler.header("Cache-Control") == "no-cache"
+    assert handler.header("Cache-Control") == "private, no-cache"
     assert handler.header("ETag")

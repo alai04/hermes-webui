@@ -18444,14 +18444,25 @@ def _close_fd_quietly(fd: int | None) -> None:
         pass
 
 
-def _file_etag(st) -> str:
-    """Weak ETag from file metadata (mtime_ns + size).
+def _file_etag(fd) -> str:
+    """Weak ETag from a streaming content digest of the already-authorized fd.
 
-    W/ prefix = weak comparison semantics per RFC 7232: metadata equality is
-    treated as semantic equivalence, which is exactly what revalidation needs —
-    a 304 tells the browser its cached copy is still valid.
+    Metadata-only validators (mtime_ns + size) cannot detect same-size
+    in-place replacements on filesystems with coarse mtime resolution (many
+    expose 2-second granularity), which would serve the stale copy forever —
+    exactly the bug this feature sets out to fix. Hashing the content through
+    the same fd used for serving guarantees the validator reflects the bytes
+    the client will actually receive. The fd is rewound to the start before
+    returning so the normal/Range send path can read from the beginning.
     """
-    return 'W/"%d-%d"' % (st.st_mtime_ns, st.st_size)
+    hasher = hashlib.sha256()
+    while True:
+        chunk = os.read(fd, 1024 * 256)
+        if not chunk:
+            break
+        hasher.update(chunk)
+    os.lseek(fd, 0, os.SEEK_SET)  # rewind for the normal/Range send below
+    return 'W/"%s"' % hasher.hexdigest()
 
 
 def _serve_file_bytes(handler, target: Path, mime: str, disposition: str, cache_control: str, *, csp: str | None = None, anchor_root: Path | None = None):
@@ -18479,7 +18490,7 @@ def _serve_file_bytes(handler, target: Path, mime: str, disposition: str, cache_
         _close_fd_quietly(fd)
         return bad(handler, "Could not stat file", 500)
 
-    etag = _file_etag(st)
+    etag = _file_etag(fd)
     # RFC 7232 §3.2: If-None-Match uses weak comparison (W/ prefixes ignored)
     # and "*" matches any existing resource. On match, GET/HEAD is
     # short-circuited with 304 — processed before Range since a matched
@@ -18493,10 +18504,13 @@ def _serve_file_bytes(handler, target: Path, mime: str, disposition: str, cache_
             if c.strip()
         )
         if matched:
+            # RFC 9110 §15.4.5: a 304 carries no body and no Content-Length;
+            # close the fd here since the finally block below only guards the
+            # normal/Range send path.
+            _close_fd_quietly(fd)
             handler.send_response(304)
             handler.send_header("ETag", etag)
             handler.send_header("Cache-Control", cache_control)
-            handler.send_header("Content-Length", "0")
             _security_headers(handler)
             handler.end_headers()
             return True
@@ -19533,14 +19547,16 @@ def _handle_media(handler, parsed):
     # HTML inline previews change frequently (agent edits + re-renders).
     # Use no-store so the browser always fetches fresh content, avoiding stale
     # previews that require a manual full-page refresh to update.
-    # All other media (images, audio, video, PDF) use no-cache + ETag
+    # All other media (images, audio, video, PDF) use private, no-cache + ETag
     # revalidation (see _serve_file_bytes): the browser may cache, but must
     # revalidate on every use, so a file replaced in place (same name) is
     # picked up immediately while unchanged files still short-circuit with 304.
+    # The `private` directive keeps per-user/per-session media out of shared
+    # intermediary caches.
     if mime == "text/html":
         cache_control = "no-store"
     else:
-        cache_control = "no-cache"
+        cache_control = "private, no-cache"
     return _serve_file_bytes(handler, target, mime, disposition, cache_control, csp=csp)
 
 
