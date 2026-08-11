@@ -367,6 +367,7 @@ def test_cli_only_slugs_reserve_skill_autocomplete_namespace():
 def test_skill_autocomplete_matches_keyword_in_name_or_description():
     result = _run_commands_js(
         """
+        await loadBundleCommands(true);
         await loadSkillCommands(true);
         const upgrade = await getSlashAutocompleteMatches('/upgrade');
         const reinstall = await getSlashAutocompleteMatches('/reinstall');
@@ -397,6 +398,66 @@ def test_skill_autocomplete_hides_keyword_match_shadowed_by_bundle():
     )
 
     assert result == []
+
+
+def test_skill_autocomplete_waits_for_bundle_metadata_before_showing_colliding_keyword_match():
+    script = textwrap.dedent(
+        f"""
+        const vm = require('vm');
+        let releaseBundles;
+        const bundlesReady = new Promise(resolve => {{ releaseBundles = resolve; }});
+        const ctx = {{
+          console,
+          localStorage: {{ getItem(){{return null;}}, setItem(){{}}, removeItem(){{}} }},
+          t: (key) => key,
+          api: async (path) => {{
+            if (path === '/api/commands') return {{ commands: [] }};
+            if (path === '/api/commands/bundles') return bundlesReady;
+            if (path === '/api/skills') return {{ skills: [
+              {{
+                name: 'incident-review',
+                description: 'Handle a non-colliding keyword',
+                category: 'ops'
+              }}
+            ] }};
+            throw new Error('unexpected api path: ' + path);
+          }}
+        }};
+        vm.createContext(ctx);
+        vm.runInContext({json.dumps(COMMANDS_JS)}, ctx);
+        (async () => {{
+          await vm.runInContext('loadSkillCommands(true)', ctx);
+          const bundleLoad = vm.runInContext('loadBundleCommands(true)', ctx);
+          const before = await vm.runInContext("getSlashAutocompleteMatches('/non-colliding')", ctx);
+          releaseBundles({{ bundles: [
+            {{
+              name: 'incident-review',
+              description: 'Incident review bundle',
+              skill_count: 3,
+              source: 'bundle'
+            }}
+          ] }});
+          await bundleLoad;
+          const after = await vm.runInContext("getSlashAutocompleteMatches('/non-colliding')", ctx);
+          process.stdout.write(JSON.stringify({{
+            before: before.map(item => ({{ name: item.name, source: item.source }})),
+            after: after.map(item => ({{ name: item.name, source: item.source }}))
+          }}));
+        }})().catch(err => {{
+          console.error(err && err.stack || err);
+          process.exit(1);
+        }});
+        """
+    )
+    with tempfile.NamedTemporaryFile("w", suffix=".js", encoding="utf-8", delete=False) as handle:
+        handle.write(script)
+        script_path = Path(handle.name)
+    try:
+        proc = subprocess.run(["node", str(script_path)], check=True, capture_output=True, text=True)
+    finally:
+        script_path.unlink(missing_ok=True)
+
+    assert json.loads(proc.stdout) == {"before": [], "after": []}
 
 
 def test_bundle_collisions_stay_hidden_until_agent_metadata_is_ready():

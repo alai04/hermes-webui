@@ -228,6 +228,10 @@ function getMatchingCommands(prefix){
       seen.add(bundle.name);
     }
   }
+  // A same-slug bundle owns dispatch. Hold plain skills until the independent
+  // bundle metadata request settles so a slow bundle response cannot briefly
+  // expose a selectable, shadowed skill.
+  if(!_bundleCommandCacheReady)return matches;
   for(const skill of _skillCommandCache){
     const name=String(skill&&skill.name||'').toLowerCase();
     const description=String(skill&&skill.desc||'').toLowerCase();
@@ -2089,8 +2093,9 @@ function refreshSlashCommandDropdown(){
   });
 }
 function ensureSkillCommandsLoadedForAutocomplete(){
-  if(_skillCommandCacheReady||_skillCommandLoadPromise)return;
-  loadSkillCommands().then(()=>{refreshSlashCommandDropdown();});
+  if(!_skillCommandCacheReady&&!_skillCommandLoadPromise){
+    loadSkillCommands().then(()=>{refreshSlashCommandDropdown();});
+  }
   if(!_bundleCommandCacheReady&&!_bundleCommandLoadPromise){
     loadBundleCommands().then(()=>{refreshSlashCommandDropdown();});
   }
