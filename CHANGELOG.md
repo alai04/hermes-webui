@@ -5,6 +5,8 @@
 
 ### Changed
 
+- **Refine selected transcript text directly in the composer.** Selecting text inside a chat message now shows a "Refine" action alongside "Reply with selection" in the floating selection toolbar. Refine seeds the selected text into the composer as an editable draft (a quoted block plus a localized "Refine instruction:" line, caret ready) so you can shape a follow-up before sending — the ChatGPT/Notion-style quote-to-edit flow. The transfer is one-way and marker-free (no internal sentinel reaches the composer or the sent message), preserves any existing draft and attachments, collapses to 44×44 icon-only buttons on phones, and covers all 15 locales. Thanks @rodboev. (#6410)
+
 - **Transparent Stream copy buttons now confirm success in place.** The tool-event and thinking copy controls flash a check for ~1.5s after a successful copy — the same feedback the normal chat copy buttons already give — then revert to the copy glyph. The confirmation is now clearly visible without hover (important on touch), stays correct across live-row reconciliation, cleans up if its row is torn down mid-feedback, and is never serialized into a restored session snapshot. Thanks @Stacey2911. (#6037)
 
 - **Kanban boards can now set a default workspace path.** The board settings modal gains a "Default workspace path" field (a type-or-pick combobox sourced from your saved workspaces, so you can choose a known path or type a custom one — validated server-side). Tasks on the board without an explicit workspace path inherit this default. The board switcher chip is now always shown (even with a single board) and its menu item is now "Board settings…", enabled for the default board. Thanks @rodboev. (#6055, #5932)
