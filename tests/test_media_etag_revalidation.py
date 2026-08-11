@@ -299,3 +299,57 @@ def test_handle_media_pdf_uses_no_cache(routes, monkeypatch, tmp_path):
     assert handler.status == 200
     assert handler.header("Cache-Control") == "private, no-cache"
     assert handler.header("ETag")
+
+
+def test_large_file_skips_etag_no_hashing(routes, tmp_path):
+    """Files above the cap must be served without ETag to avoid hashing every
+    byte of a large video / Range request."""
+    target = tmp_path / "big.bin"
+    target.write_bytes(b"X" * (10 * 1024 * 1024 + 1))  # _ETAG_SIZE_CAP + 1
+    handler, _ = _serve(routes, target, "application/octet-stream", "private, no-cache")
+    assert handler.status == 200
+    assert not handler.header("ETag")
+
+
+def test_etag_no_body_on_pread_failure(routes, tmp_path, monkeypatch):
+    """If pread fails during ETag computation, the fd must be closed and
+    the response must be 500 (not an unhandled exception)."""
+    target = tmp_path / "img.png"
+    target.write_bytes(b"abc")
+
+    real_close = os.close
+    closed = []
+    monkeypatch.setattr(
+        "api.routes.os.pread", lambda fd, n, off: (_ for _ in ()).throw(OSError(5, "EIO"))
+    )
+    monkeypatch.setattr(
+        "api.routes.os.close", lambda fd: (closed.append(fd), real_close(fd))[1]
+    )
+
+    handler, result = _serve(routes, target, "image/png", "private, no-cache")
+    assert handler.status == 500
+    assert closed, "fd was not closed on pread failure"
+
+
+def test_pread_snapshot_matches_served_bytes(routes, tmp_path, monkeypatch):
+    """TOCTOU: the file is replaced between ETag computation and body send;
+    the pread snapshot guarantees the ETag and the served bytes agree."""
+    target = tmp_path / "img.png"
+    target.write_bytes(b"snapshot")
+    handler, _ = _serve(routes, target, "image/png", "private, no-cache")
+    assert handler.status == 200
+    assert handler.body == b"snapshot"
+    etag = handler.header("ETag")
+
+    # Replace the file on disk with different content but same path.
+    target.write_bytes(b"MUTATED!")
+
+    # A subsequent request with the old ETag must 304 because the
+    # snapshot that was actually served still matches.
+    handler2, _ = _serve(
+        routes, target, "image/png", "private, no-cache",
+        headers={"If-None-Match": etag},
+    )
+    assert handler2.status == 200  # new snapshot ≠ old ETag
+    assert handler2.body == b"MUTATED!"
+    assert handler2.header("ETag") != etag

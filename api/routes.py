@@ -18444,25 +18444,33 @@ def _close_fd_quietly(fd: int | None) -> None:
         pass
 
 
-def _file_etag(fd) -> str:
-    """Weak ETag from a streaming content digest of the already-authorized fd.
+# Maximum size for which a content-derived ETag is computed.  Files above
+# this cap (and all HTML with no-store) are served without ETag to avoid
+# hashing every byte of large media / Range requests.
+_ETAG_SIZE_CAP = 10 * 1024 * 1024  # 10 MB
 
-    Metadata-only validators (mtime_ns + size) cannot detect same-size
-    in-place replacements on filesystems with coarse mtime resolution (many
-    expose 2-second granularity), which would serve the stale copy forever —
-    exactly the bug this feature sets out to fix. Hashing the content through
-    the same fd used for serving guarantees the validator reflects the bytes
-    the client will actually receive. The fd is rewound to the start before
-    returning so the normal/Range send path can read from the beginning.
+
+def _bytes_etag(data: bytes) -> str:
+    """Weak ETag from a content digest of the bytes that will be served.
+
+    The bytes must be an immutable snapshot (e.g. pread or an in-memory copy)
+    so the validator cannot diverge from the body under TOCTOU.
     """
-    hasher = hashlib.sha256()
-    while True:
-        chunk = os.read(fd, 1024 * 256)
-        if not chunk:
-            break
-        hasher.update(chunk)
-    os.lseek(fd, 0, os.SEEK_SET)  # rewind for the normal/Range send below
-    return 'W/"%s"' % hasher.hexdigest()
+    return 'W/"%s"' % hashlib.sha256(data).hexdigest()
+
+
+def _etag_and_snapshot(fd, *, file_size: int) -> tuple[str | None, bytes | None]:
+    """Return (weak ETag, snapshot bytes) for files under the size cap.
+
+    Uses a single pread to grab an immutable snapshot, then hashes it.
+    The snapshot bytes can be sent directly so the ETag and the body can
+    never diverge under TOCTOU (the file may change on disk after pread).
+    Returns (None, None) for files above the cap or on unexpected I/O failure.
+    """
+    if file_size > _ETAG_SIZE_CAP:
+        return None, None
+    data = os.pread(fd, file_size, 0)
+    return _bytes_etag(data), data
 
 
 def _serve_file_bytes(handler, target: Path, mime: str, disposition: str, cache_control: str, *, csp: str | None = None, anchor_root: Path | None = None):
@@ -18490,32 +18498,34 @@ def _serve_file_bytes(handler, target: Path, mime: str, disposition: str, cache_
         _close_fd_quietly(fd)
         return bad(handler, "Could not stat file", 500)
 
-    etag = _file_etag(fd)
-    # RFC 7232 §3.2: If-None-Match uses weak comparison (W/ prefixes ignored)
-    # and "*" matches any existing resource. On match, GET/HEAD is
-    # short-circuited with 304 — processed before Range since a matched
-    # conditional request skips the entity entirely.
-    if_none_match = handler.headers.get("If-None-Match", "")
-    if if_none_match:
-        current = etag[2:] if etag.startswith("W/") else etag
-        matched = if_none_match.strip() == "*" or any(
-            (c.strip()[2:] if c.strip().startswith("W/") else c.strip()) == current
-            for c in if_none_match.split(",")
-            if c.strip()
-        )
-        if matched:
-            # RFC 9110 §15.4.5: a 304 carries no body and no Content-Length;
-            # close the fd here since the finally block below only guards the
-            # normal/Range send path.
-            _close_fd_quietly(fd)
-            handler.send_response(304)
-            handler.send_header("ETag", etag)
-            handler.send_header("Cache-Control", cache_control)
-            _security_headers(handler)
-            handler.end_headers()
-            return True
-
     try:
+        no_store = "no-store" in cache_control
+        if no_store or file_size > _ETAG_SIZE_CAP:
+            etag = None
+            snapshot = None
+        else:
+            etag, snapshot = _etag_and_snapshot(fd, file_size=file_size)
+
+        # RFC 7232 §3.2: If-None-Match uses weak comparison (W/ prefixes ignored)
+        # and "*" matches any existing resource. On match, GET/HEAD is
+        # short-circuited with 304 — processed before Range since a matched
+        # conditional request skips the entity entirely.
+        if_none_match = handler.headers.get("If-None-Match", "")
+        if if_none_match and etag is not None:
+            current = etag[2:] if etag.startswith("W/") else etag
+            matched = if_none_match.strip() == "*" or any(
+                (c.strip()[2:] if c.strip().startswith("W/") else c.strip()) == current
+                for c in if_none_match.split(",")
+                if c.strip()
+            )
+            if matched:
+                handler.send_response(304)
+                handler.send_header("ETag", etag)
+                handler.send_header("Cache-Control", cache_control)
+                _security_headers(handler)
+                handler.end_headers()
+                return True
+
         byte_range = _parse_range_header(handler.headers.get("Range", ""), file_size)
         if handler.headers.get("Range") and byte_range is None:
             handler.send_response(416)
@@ -18532,7 +18542,8 @@ def _serve_file_bytes(handler, target: Path, mime: str, disposition: str, cache_
         handler.send_header("Content-Type", mime)
         handler.send_header("Content-Length", str(content_length))
         handler.send_header("Accept-Ranges", "bytes")
-        handler.send_header("ETag", etag)
+        if etag is not None:
+            handler.send_header("ETag", etag)
         if byte_range:
             handler.send_header("Content-Range", f"bytes {start}-{end}/{file_size}")
         handler.send_header("Cache-Control", cache_control)
@@ -18552,20 +18563,25 @@ def _serve_file_bytes(handler, target: Path, mime: str, disposition: str, cache_
         handler.end_headers()
 
         if content_length:
-            try:
-                with os.fdopen(fd, "rb", closefd=True) as f:
-                    fd = None
-                    f.seek(start)
-                    remaining = content_length
-                    while remaining:
-                        chunk = f.read(min(1024 * 1024, remaining))
-                        if not chunk:
-                            break
-                        handler.wfile.write(chunk)
-                        remaining -= len(chunk)
-            except PermissionError:
-                return True
+            if snapshot is not None:
+                handler.wfile.write(snapshot[start:start + content_length])
+            else:
+                try:
+                    with os.fdopen(fd, "rb", closefd=True) as f:
+                        fd = None
+                        f.seek(start)
+                        remaining = content_length
+                        while remaining:
+                            chunk = f.read(min(1024 * 1024, remaining))
+                            if not chunk:
+                                break
+                            handler.wfile.write(chunk)
+                            remaining -= len(chunk)
+                except PermissionError:
+                    return True
         return True
+    except OSError:
+        return bad(handler, "Could not serve file", 500)
     finally:
         _close_fd_quietly(fd)
 
