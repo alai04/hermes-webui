@@ -5,7 +5,7 @@
 
 ### Fixed
 
-- **Layout test helper no longer flags scroll-reachable fields as off-viewport.** The shared `assert_layout_sane` degenerate check reported a false "interactive element is off-viewport" for an input that sits below the fold at rest but is reachable by scrolling an `overflow-y:auto` ancestor (e.g. a tall dialog on a short landscape viewport). It now exempts elements whose off-viewport edge is absorbed by a scrollable ancestor, while still flagging genuinely-unreachable elements (no scroll escape). This removes a CI-environment-sensitive flake on the Kanban board settings modal at 480×320. (internal test infra)
+- **Layout test helper no longer flags scroll-reachable fields as off-viewport.** The shared `assert_layout_sane` degenerate check reported a false "interactive element is off-viewport" for an input that sits below the fold at rest but is reachable by scrolling an `overflow-y:auto` ancestor (e.g. a tall dialog on a short landscape viewport). It now exempts elements whose off-viewport edge is absorbed by a scrollable ancestor, while still flagging genuinely-unreachable elements (no scroll escape). The Kanban board settings modal layout test also drops its synthetic 480×320 short-landscape case (a viewport no real device uses, whose sub-fold geometry was environment-marginal and CI-flaky); real desktop/tablet/narrow viewports still assert the layout. (internal test infra)
 
 ### Changed
 
