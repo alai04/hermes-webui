@@ -215,6 +215,18 @@ def _run_commands_js(script_body: str) -> dict:
                 {{
                   name: 'plugin review',
                   description: 'Plugin collisions should stay hidden from slash autocomplete'
+                }},
+                {{
+                  name: 'hermes-upgrade',
+                  description: 'Safely upgrade and verify a Hermes installation'
+                }},
+                {{
+                  name: 'maintenance-guide',
+                  description: 'Plan a safe upgrade and rollback path'
+                }},
+                {{
+                  name: 'reinstall-helper',
+                  description: 'Recover from a failed reinstall'
                 }}
               ]
             }};
@@ -350,6 +362,41 @@ def test_cli_only_slugs_reserve_skill_autocomplete_namespace():
     assert result["plugin_sources"] == ["plugin"]
     assert "skills" in result["skills_names"]
     assert "use" in result["use_names"]
+
+
+def test_skill_autocomplete_matches_keyword_in_name_or_description():
+    result = _run_commands_js(
+        """
+        await loadSkillCommands(true);
+        const upgrade = await getSlashAutocompleteMatches('/upgrade');
+        const reinstall = await getSlashAutocompleteMatches('/reinstall');
+        return {
+          upgrade_names: upgrade.map(item => item.name),
+          upgrade_sources: upgrade.map(item => item.source),
+          reinstall_names: reinstall.map(item => item.name),
+          reinstall_sources: reinstall.map(item => item.source)
+        };
+        """
+    )
+
+    assert result["upgrade_names"] == ["hermes-upgrade", "maintenance-guide"]
+    assert result["upgrade_sources"] == ["skill", "skill"]
+    assert result["reinstall_names"] == ["reinstall-helper"]
+    assert result["reinstall_sources"] == ["skill"]
+
+
+def test_skill_autocomplete_hides_keyword_match_shadowed_by_bundle():
+    result = _run_commands_js(
+        """
+        await loadAgentCommandMetadata(true);
+        await loadBundleCommands(true);
+        await loadSkillCommands(true);
+        const matches = await getSlashAutocompleteMatches('/non-colliding');
+        return matches.map(item => ({ name: item.name, source: item.source }));
+        """
+    )
+
+    assert result == []
 
 
 def test_bundle_collisions_stay_hidden_until_agent_metadata_is_ready():
