@@ -302,7 +302,7 @@ described above.
 
 ### Turn lifecycle events
 
-A registered extension can react when a chat turn observed by the current page
+A registered extension can react when a session turn observed by the current page
 starts or reaches a terminal state:
 
 ```js
@@ -324,7 +324,7 @@ for an unsupported type or non-function handler. An exception in one extension
 listener is logged and does not prevent other listeners or the chat UI from
 continuing.
 
-The version-1 mapping is deliberately small: attaching a confirmed live chat
+The version-1 mapping is deliberately small: attaching a confirmed live session
 stream emits `turn:start`; SSE `done` emits `turn:complete`; SSE `cancel` and
 application errors classified as `cancelled` or `interrupted` emit
 `turn:cancel`; other application errors and an unrecoverable live-stream
@@ -340,7 +340,8 @@ This is a page-local, live-stream notification surface. It does not replay
 history, report turns that finish without this page observing their stream, or
 provide token, tool, approval, or metrics events. It follows the same cooperative
 trust model as `register(id)` and adds no sandbox or permission boundary. A
-durable or global agent event stream is a separate Core contract.
+durable or global agent event stream is a separate Core contract. Ephemeral
+`/btw` answer streams are not included in this version.
 
 ## URL rules
 
