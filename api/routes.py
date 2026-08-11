@@ -18444,12 +18444,28 @@ def _close_fd_quietly(fd: int | None) -> None:
         pass
 
 
+def _file_etag(st) -> str:
+    """Weak ETag from file metadata (mtime_ns + size).
+
+    W/ prefix = weak comparison semantics per RFC 7232: metadata equality is
+    treated as semantic equivalence, which is exactly what revalidation needs —
+    a 304 tells the browser its cached copy is still valid.
+    """
+    return 'W/"%d-%d"' % (st.st_mtime_ns, st.st_size)
+
+
 def _serve_file_bytes(handler, target: Path, mime: str, disposition: str, cache_control: str, *, csp: str | None = None, anchor_root: Path | None = None):
-    """Serve a file with correct MIME/disposition and optional byte-range support."""
+    """Serve a file with correct MIME/disposition and optional byte-range support.
+
+    Supports conditional GET via If-None-Match (ETag) — when the ETag matches,
+    the request is short-circuited with 304 so revalidating clients (e.g.
+    `no-cache` responses) do not re-download unchanged files.
+    """
     fd = None
     try:
         fd = _open_file_read_fd(target, anchor_root)
-        file_size = os.fstat(fd).st_size
+        st = os.fstat(fd)
+        file_size = st.st_size
     except PermissionError:
         _close_fd_quietly(fd)
         return bad(handler, "Permission denied", 403)
@@ -18462,6 +18478,28 @@ def _serve_file_bytes(handler, target: Path, mime: str, disposition: str, cache_
     except Exception:
         _close_fd_quietly(fd)
         return bad(handler, "Could not stat file", 500)
+
+    etag = _file_etag(st)
+    # RFC 7232 §3.2: If-None-Match uses weak comparison (W/ prefixes ignored)
+    # and "*" matches any existing resource. On match, GET/HEAD is
+    # short-circuited with 304 — processed before Range since a matched
+    # conditional request skips the entity entirely.
+    if_none_match = handler.headers.get("If-None-Match", "")
+    if if_none_match:
+        current = etag[2:] if etag.startswith("W/") else etag
+        matched = if_none_match.strip() == "*" or any(
+            (c.strip()[2:] if c.strip().startswith("W/") else c.strip()) == current
+            for c in if_none_match.split(",")
+            if c.strip()
+        )
+        if matched:
+            handler.send_response(304)
+            handler.send_header("ETag", etag)
+            handler.send_header("Cache-Control", cache_control)
+            handler.send_header("Content-Length", "0")
+            _security_headers(handler)
+            handler.end_headers()
+            return True
 
     try:
         byte_range = _parse_range_header(handler.headers.get("Range", ""), file_size)
@@ -18480,6 +18518,7 @@ def _serve_file_bytes(handler, target: Path, mime: str, disposition: str, cache_
         handler.send_header("Content-Type", mime)
         handler.send_header("Content-Length", str(content_length))
         handler.send_header("Accept-Ranges", "bytes")
+        handler.send_header("ETag", etag)
         if byte_range:
             handler.send_header("Content-Range", f"bytes {start}-{end}/{file_size}")
         handler.send_header("Cache-Control", cache_control)
@@ -19494,7 +19533,14 @@ def _handle_media(handler, parsed):
     # HTML inline previews change frequently (agent edits + re-renders).
     # Use no-store so the browser always fetches fresh content, avoiding stale
     # previews that require a manual full-page refresh to update.
-    cache_control = "no-store" if mime == "text/html" else "private, max-age=3600"
+    # All other media (images, audio, video, PDF) use no-cache + ETag
+    # revalidation (see _serve_file_bytes): the browser may cache, but must
+    # revalidate on every use, so a file replaced in place (same name) is
+    # picked up immediately while unchanged files still short-circuit with 304.
+    if mime == "text/html":
+        cache_control = "no-store"
+    else:
+        cache_control = "no-cache"
     return _serve_file_bytes(handler, target, mime, disposition, cache_control, csp=csp)
 
 
