@@ -2,6 +2,7 @@
 
 import json
 from pathlib import Path
+import re
 import shutil
 import subprocess
 import textwrap
@@ -10,8 +11,173 @@ import pytest
 
 
 ROOT = Path(__file__).parent.parent
+STATIC = ROOT / "static"
 EXTENSION_SETTINGS_JS = ROOT / "static" / "extension_settings.js"
 MESSAGES_JS = (ROOT / "static" / "messages.js").read_text(encoding="utf-8")
+INDEX_HTML = (STATIC / "index.html").read_text(encoding="utf-8")
+UI_JS = (STATIC / "ui.js").read_text(encoding="utf-8")
+SUPPORT_SCRIPTS = [
+    (STATIC / name).read_text(encoding="utf-8")
+    for name in ("i18n.js", "icons.js", "assistant_turn_anchors.js")
+]
+HARNESS_HTML = re.sub(r"<script\b[^>]*>.*?</script>", "", INDEX_HTML, flags=re.I | re.S)
+HARNESS_HTML = re.sub(r"<link\b[^>]*>", "", HARNESS_HTML, flags=re.I)
+
+
+_MOCK_EVENT_SOURCE = r"""
+class MockEventSource {
+  static CONNECTING = 0;
+  static OPEN = 1;
+  static CLOSED = 2;
+  static instances = [];
+  constructor(url) {
+    this.url = String(url);
+    this.readyState = MockEventSource.OPEN;
+    this.listeners = new Map();
+    MockEventSource.instances.push(this);
+  }
+  addEventListener(name, listener) {
+    const listeners = this.listeners.get(name) || [];
+    listeners.push(listener);
+    this.listeners.set(name, listeners);
+  }
+  removeEventListener(name, listener) {
+    this.listeners.set(name, (this.listeners.get(name) || []).filter(fn => fn !== listener));
+  }
+  async emit(name, payload) {
+    const event = {type: name, data: JSON.stringify(payload), lastEventId: ''};
+    await Promise.all((this.listeners.get(name) || []).map(listener => listener(event)));
+  }
+  close() { this.readyState = MockEventSource.CLOSED; }
+}
+window.EventSource = MockEventSource;
+window.MockEventSource = MockEventSource;
+"""
+
+
+_STABILIZE_UNRELATED_UI = r"""
+appendLiveCompressionCard = () => false;
+resetTurnWorkspaceMutations = () => {};
+_resetStreamScrollFollow = () => {};
+ensureLiveWorklogShell = () => {};
+_shouldUseLiveProseFade = () => false;
+_shouldFollowMessagesOnDomReplace = () => false;
+_isMessagePaneNearBottom = () => false;
+_markSessionViewed = () => {};
+setBusy = value => { S.busy = Boolean(value); };
+setComposerStatus = () => {};
+setStatus = () => {};
+syncTopbar = () => {};
+renderMessages = () => {};
+renderSessionList = () => {};
+renderSessionArtifacts = () => {};
+loadDir = () => {};
+playNotificationSound = () => {};
+sendBrowserNotification = () => {};
+api = async () => ({});
+"""
+
+
+_LIFECYCLE_SCENARIO = r"""
+async ({kind}) => {
+  const activeSid = 'session-a';
+  const streamId = `stream-${kind}`;
+  const lifecycle = [];
+  const extension = window.hermesExt.register('lifecycle-probe');
+  if (!extension) throw new Error('lifecycle probe did not register');
+  for (const type of ['turn:start', 'turn:complete', 'turn:error', 'turn:cancel']) {
+    extension.events.on(type, event => {
+      const lastMessage = Array.isArray(S.messages) ? S.messages.at(-1) : null;
+      lifecycle.push({
+        event: {...event},
+        activeStreamId: S.activeStreamId || null,
+        busy: Boolean(S.busy),
+        currentSid: S.session && S.session.session_id || null,
+        lastContent: lastMessage && lastMessage.content || null,
+      });
+    });
+  }
+
+  S.session = {session_id: activeSid, messages: [{role: 'user', content: 'question'}]};
+  S.messages = [{role: 'user', content: 'question'}];
+  S.toolCalls = [];
+  S.activeStreamId = streamId;
+  S.busy = true;
+  attachLiveStream(activeSid, streamId, []);
+  const source = MockEventSource.instances.at(-1);
+  if (!source) throw new Error('attachLiveStream did not construct EventSource');
+
+  if (kind === 'done') {
+    await source.emit('done', {
+      status: 'completed',
+      stream_id: streamId,
+      session: {
+        session_id: activeSid,
+        messages: [{role: 'assistant', content: 'settled-done'}],
+        tool_calls: [],
+      },
+    });
+  } else if (kind === 'apperror') {
+    await source.emit('apperror', {
+      type: 'provider_error',
+      status: 'provider_error',
+      message: 'provider failed',
+      session_id: activeSid,
+      session: {
+        session_id: activeSid,
+        messages: [{role: 'assistant', content: 'settled-error'}],
+      },
+    });
+  } else if (kind === 'apperror-cancel') {
+    await source.emit('apperror', {
+      type: 'interrupted',
+      status: 'interrupted',
+      message: 'interrupted',
+      session_id: activeSid,
+      session: {
+        session_id: activeSid,
+        messages: [{role: 'assistant', content: 'settled-interrupted'}],
+      },
+    });
+  } else if (kind === 'cancel') {
+    await source.emit('cancel', {
+      type: 'cancelled',
+      status: 'cancelled',
+      session_id: activeSid,
+      session: {
+        session_id: activeSid,
+        messages: [{role: 'assistant', content: 'settled-cancel'}],
+      },
+    });
+  } else if (kind === 'connection-error') {
+    const nativeSetTimeout = window.setTimeout;
+    api = async url => String(url).includes('/api/chat/stream/status')
+      ? {active: false, replay_available: false}
+      : {};
+    window.setTimeout = callback => {
+      queueMicrotask(callback);
+      return 1;
+    };
+    try {
+      await source.emit('error', {});
+      await new Promise((resolve, reject) => {
+        const deadline = Date.now() + 2000;
+        const poll = () => {
+          if (lifecycle.some(entry => entry.event.type === 'turn:error')) return resolve();
+          if (Date.now() >= deadline) return reject(new Error('connection terminal event not observed'));
+          nativeSetTimeout(poll, 0);
+        };
+        poll();
+      });
+    } finally {
+      window.setTimeout = nativeSetTimeout;
+    }
+  } else {
+    throw new Error(`unknown lifecycle scenario: ${kind}`);
+  }
+  return lifecycle;
+}
+"""
 
 
 def _function_body(source: str, name: str) -> str:
@@ -206,6 +372,91 @@ def test_live_stream_bridge_forwards_normalized_lifecycle_details():
     _run_node(script)
 
 
+@pytest.fixture(scope="module")
+def lifecycle_browser():
+    playwright_api = pytest.importorskip("playwright.sync_api")
+    with playwright_api.sync_playwright() as playwright:
+        browser = playwright.chromium.launch(
+            headless=True,
+            args=["--no-sandbox", "--disable-dev-shm-usage"],
+        )
+        yield browser
+        browser.close()
+
+
+def _run_lifecycle_scenario(browser, kind: str) -> list[dict]:
+    page = browser.new_page()
+    page.route(
+        "**/*",
+        lambda route: route.fulfill(
+            status=200,
+            content_type="text/html"
+            if route.request.url == "http://harness.test/"
+            else "text/plain",
+            body=HARNESS_HTML if route.request.url == "http://harness.test/" else "",
+        ),
+    )
+    page.add_init_script(_MOCK_EVENT_SOURCE)
+    try:
+        page.goto("http://harness.test/", wait_until="domcontentloaded")
+        page.evaluate(
+            """
+            window.__HERMES_EXTENSION_CONFIG__ = {
+              extensions: [{id: 'lifecycle-probe', storage_owned: false}],
+            };
+            """
+        )
+        for script in SUPPORT_SCRIPTS:
+            page.add_script_tag(content=script)
+        page.add_script_tag(content=EXTENSION_SETTINGS_JS.read_text(encoding="utf-8"))
+        page.add_script_tag(content=UI_JS)
+        page.add_script_tag(content=MESSAGES_JS)
+        page.evaluate(_STABILIZE_UNRELATED_UI)
+        return page.evaluate(_LIFECYCLE_SCENARIO, {"kind": kind})
+    finally:
+        page.close()
+
+
+@pytest.mark.parametrize(
+    ("kind", "terminal_type", "terminal_status", "last_content"),
+    [
+        ("done", "turn:complete", "completed", "settled-done"),
+        ("apperror", "turn:error", "provider_error", "settled-error"),
+        ("apperror-cancel", "turn:cancel", "interrupted", "settled-interrupted"),
+        ("cancel", "turn:cancel", "cancelled", "settled-cancel"),
+        (
+            "connection-error",
+            "turn:error",
+            "connection_lost",
+            "**Connection interrupted:** The browser lost the live SSE connection before the response finished. If the worker completed, reopening this session should restore the settled transcript.",
+        ),
+    ],
+)
+def test_real_sse_terminal_callback_observes_settled_core_state(
+    lifecycle_browser,
+    kind,
+    terminal_type,
+    terminal_status,
+    last_content,
+):
+    lifecycle = _run_lifecycle_scenario(lifecycle_browser, kind)
+
+    assert [entry["event"]["type"] for entry in lifecycle] == [
+        "turn:start",
+        terminal_type,
+    ]
+    start, terminal = lifecycle
+    assert start["activeStreamId"] == f"stream-{kind}"
+    assert start["busy"] is True
+    assert terminal["event"]["sessionId"] == "session-a"
+    assert terminal["event"]["streamId"] == f"stream-{kind}"
+    assert terminal["event"]["status"] == terminal_status
+    assert terminal["activeStreamId"] is None
+    assert terminal["busy"] is False
+    assert terminal["currentSid"] == "session-a"
+    assert terminal["lastContent"] == last_content
+
+
 def test_live_stream_terminal_paths_use_original_stream_owner_identity():
     attach_start = MESSAGES_JS.index("function attachLiveStream(")
     attach_body = MESSAGES_JS[attach_start : MESSAGES_JS.index("\nfunction transcript(", attach_start)]
@@ -222,6 +473,22 @@ def test_live_stream_terminal_paths_use_original_stream_owner_identity():
     assert "_dispatchExtensionTurnLifecycle(_extensionErrorType,activeSid,streamId" in application_error
     assert "_dispatchExtensionTurnLifecycle('turn:cancel',activeSid,streamId" in cancel
     assert "_dispatchExtensionTurnLifecycle('turn:error',activeSid,streamId" in connection_error
+
+    assert done.index("_setActivePaneIdleIfOwner()") < done.index(
+        "_dispatchExtensionTurnLifecycle('turn:complete'"
+    )
+    assert application_error.index("renderSessionList()") < application_error.index(
+        "_dispatchExtensionTurnLifecycle(_extensionErrorType"
+    )
+    assert cancel.index("await api(") < cancel.index(
+        "_dispatchExtensionTurnLifecycle('turn:cancel'"
+    )
+    assert cancel.index("_setActivePaneIdleIfOwner()") < cancel.index(
+        "_dispatchExtensionTurnLifecycle('turn:cancel'"
+    )
+    assert connection_error.index("_setActivePaneIdleIfOwner()") < connection_error.index(
+        "_dispatchExtensionTurnLifecycle('turn:error'"
+    )
 
     assert "_dispatchExtensionTurnLifecycle('turn:complete',completedSid" not in done
     assert "_dispatchExtensionTurnLifecycle(_extensionErrorType,d.session_id" not in application_error

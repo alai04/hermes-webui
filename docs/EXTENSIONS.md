@@ -335,6 +335,11 @@ Core suppresses reconnect duplicates so a recently observed
 `sessionId`/`streamId` pair produces at most one start event and one terminal
 event. `sessionId` is the owner of the original stream; server-side compression
 or session rotation at completion does not change that lifecycle identity.
+Terminal callbacks run after Core has cleared the original stream ownership,
+applied the current session's immediate terminal transcript projection, and
+returned the owned pane to its idle state. They do not wait for unrelated
+follow-up work such as notifications, queued turns, or optional recovery
+refreshes.
 
 This is a page-local, live-stream notification surface. It does not replay
 history, report turns that finish without this page observing their stream, or
