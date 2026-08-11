@@ -2066,9 +2066,26 @@ function closeOtherLiveStreams(activeSid){
   }
 }
 
+function _dispatchExtensionTurnLifecycle(type,sessionId,streamId,details={}){
+  const runtime=typeof window!=='undefined'&&window.HermesExtensionSettings;
+  const dispatch=runtime&&runtime._dispatchTurnLifecycle;
+  if(typeof dispatch!=='function') return false;
+  try{
+    return dispatch(type,{sessionId,streamId,...details});
+  }catch(error){
+    if(typeof console!=='undefined'&&typeof console.error==='function'){
+      try{console.error('[Hermes extensions] lifecycle dispatch failed:',error);}catch(_loggingError){ }
+    }
+    return false;
+  }
+}
+
 function attachLiveStream(activeSid, streamId, uploaded=[], options={}){
   if(!activeSid||!streamId) return;
   const reconnecting=!!options.reconnecting;
+  const _extensionTurnStartedAt=(S.session&&S.session.session_id===activeSid&&Number.isFinite(S.session.pending_started_at))
+    ?S.session.pending_started_at
+    :Date.now()/1000;
   // #4416: start (or, on reconnect for the SAME stream, keep) tracking whether
   // the tab was hidden during this stream so the done-notification fires for a
   // backgrounded tab. A reconnect with a different streamId re-seeds (the old
@@ -6082,6 +6099,10 @@ function attachLiveStream(activeSid, streamId, uploaded=[], options={}){
         }
         if(isSessionViewed) _markSessionViewed(completedSid, completedMessageCount);
         _clearOwnerInflightState();
+        _dispatchExtensionTurnLifecycle('turn:complete',activeSid,streamId,{
+          status:d.status||'completed',
+          endedAt:Date.now()/1000,
+        });
         if(typeof _markSessionCompletedInList==='function'){
           _markSessionCompletedInList(completedSession, activeSid);
         }
@@ -6492,6 +6513,11 @@ function attachLiveStream(activeSid, streamId, uploaded=[], options={}){
       _clearClarifyForOwner('terminal');
       let d={};
       try{ d=JSON.parse(e.data||'{}')||{}; }catch(_){ d={}; }
+      const _extensionErrorType=(d.type==='cancelled'||d.type==='interrupted')?'turn:cancel':'turn:error';
+      _dispatchExtensionTurnLifecycle(_extensionErrorType,activeSid,streamId,{
+        status:d.status||d.type||(_extensionErrorType==='turn:cancel'?'cancelled':'error'),
+        endedAt:Date.now()/1000,
+      });
       const currentSid=S.session&&S.session.session_id;
       const eventSid=d.old_session_id||d.session_id||'';
       const continuationSid=(d.session&&d.session.session_id)||d.new_session_id||d.continuation_session_id||'';
@@ -6748,6 +6774,10 @@ function attachLiveStream(activeSid, streamId, uploaded=[], options={}){
       _clearClarifyForOwner('cancelled');
       let _cancelData={};
       try{ _cancelData=JSON.parse(e.data||'{}')||{}; }catch(_){ _cancelData={}; }
+      _dispatchExtensionTurnLifecycle('turn:cancel',activeSid,streamId,{
+        status:_cancelData.status||_cancelData.type||'cancelled',
+        endedAt:Date.now()/1000,
+      });
       _flushReasoningToAnchor();
       _applyToAnchor('cancel',{
         status:_cancelData.status||_cancelData.type||'cancelled',
@@ -7046,6 +7076,10 @@ function attachLiveStream(activeSid, streamId, uploaded=[], options={}){
         trackBackgroundError(activeSid,_errTitle,'Connection interrupted');
       }
     }
+    _dispatchExtensionTurnLifecycle('turn:error',activeSid,streamId,{
+      status:'connection_lost',
+      endedAt:Date.now()/1000,
+    });
     _setActivePaneIdleIfOwner();
   }
 
@@ -7088,6 +7122,9 @@ function attachLiveStream(activeSid, streamId, uploaded=[], options={}){
       }catch(_){}
     }
     const replayParams=(reconnecting||replayOnly)?_runJournalReplayParams():'';
+    _dispatchExtensionTurnLifecycle('turn:start',activeSid,streamId,{
+      startedAt:_extensionTurnStartedAt,
+    });
     _wireSSE(new EventSource(new URL(`api/chat/stream?stream_id=${encodeURIComponent(streamId)}${replayParams}`,document.baseURI||location.href).href,{withCredentials:true}));
   })();
 
