@@ -3,6 +3,10 @@
 
 ## [Unreleased]
 
+### Fixed
+
+- **Layout test helper no longer flags scroll-reachable fields as off-viewport.** The shared `assert_layout_sane` degenerate check reported a false "interactive element is off-viewport" for an input that sits below the fold at rest but is reachable by scrolling an `overflow-y:auto` ancestor (e.g. a tall dialog on a short landscape viewport). It now exempts elements whose off-viewport edge is absorbed by a scrollable ancestor, while still flagging genuinely-unreachable elements (no scroll escape). This removes a CI-environment-sensitive flake on the Kanban board settings modal at 480×320. (internal test infra)
+
 ### Changed
 
 - **Refine selected transcript text directly in the composer.** Selecting text inside a chat message now shows a "Refine" action alongside "Reply with selection" in the floating selection toolbar. Refine seeds the selected text into the composer as an editable draft (a quoted block plus a localized "Refine instruction:" line, caret ready) so you can shape a follow-up before sending — the ChatGPT/Notion-style quote-to-edit flow. The transfer is one-way and marker-free (no internal sentinel reaches the composer or the sent message), preserves any existing draft and attachments, collapses to 44×44 icon-only buttons on phones, and covers all 15 locales. Thanks @rodboev. (#6410)
