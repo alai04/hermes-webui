@@ -395,7 +395,6 @@ def test_short_read_no_etag_on_truncation(routes, tmp_path, monkeypatch):
     target.write_bytes(b"0123456789")
     
     # Simulate truncation: fstat says 10, but _etag_and_snapshot's read only gets 6 bytes
-    original_read = os.read
     snapshot_reads = [0]
     
     def fake_read(fd, n):
@@ -422,10 +421,89 @@ def test_short_read_no_etag_on_truncation(routes, tmp_path, monkeypatch):
     assert handler.header("ETag") == ""
     # Content-Length must still match body
     content_length = int(handler.header("Content-Length") or "0")
-    # Since snapshot is None (truncation), file_size was updated to actual_size (6)
-    # Then the code streams from fd using fdopen, which reads the actual file (10 bytes).
-    # But wait - we monkeypatched os.read globally, so even fdopen might be affected...
-    # Actually fdopen uses the file object's read(), not os.read().
-    # The key invariant: Content-Length == len(body) should hold.
+    # Round-6 fix: we keep the snapshot data, so body is the 6-byte snapshot
+    # Content-Length derives from actual_size == len(snapshot), so they match.
     assert content_length == len(handler.body), \
         f"Content-Length {content_length} != body {len(handler.body)}"
+    assert len(handler.body) == 6, f"body should be 6-byte snapshot, got {len(handler.body)}"
+
+
+def test_shrink_again_during_body_transmission_200(routes, tmp_path, monkeypatch):
+    """When file shrinks AGAIN between first read and body transmission,
+    the captured snapshot (not re-read) is served — no header/body mismatch.
+    
+    Round-6 regression: Codex reproduced 200 advertised 6 / wrote 3.
+    """
+    target = tmp_path / "img.png"
+    target.write_bytes(b"0123456789")  # 10 bytes initially
+    
+    # Track reads to simulate shrink-again after first snapshot
+    read_calls = [0]
+    
+    def fake_read(fd, n):
+        read_calls[0] += 1
+        # First read: get 6 bytes (simulate first truncation)
+        if read_calls[0] == 1:
+            return b"012345"
+        # Subsequent reads during the loop: return empty (EOF)
+        # The loop will stop and we get a 6-byte snapshot
+        if read_calls[0] <= 3:  # Loop continues until remaining=0 or EOF
+            return b""
+        # Any read AFTER the snapshot (during body transmission):
+        # This should NEVER happen with the fix - we serve the snapshot.
+        # If it does happen, return different bytes to detect the bug.
+        return b"XXX"
+    
+    monkeypatch.setattr("api.routes.os.read", fake_read)
+    
+    handler, _ = _serve(routes, target, "image/png", "private, no-cache")
+    
+    assert handler.status == 200
+    content_length = int(handler.header("Content-Length") or "0")
+    # Content-Length should be 6 (from first snapshot), not 10 (file on disk)
+    # Body should be the 6-byte snapshot
+    assert content_length == 6, f"Content-Length should be 6, got {content_length}"
+    assert len(handler.body) == 6, f"body should be 6 bytes, got {len(handler.body)}"
+    assert handler.body == b"012345", f"body should be the captured snapshot, got {handler.body!r}"
+    assert content_length == len(handler.body), \
+        f"Content-Length {content_length} != body {len(handler.body)}"
+
+
+def test_shrink_again_during_body_transmission_range_206(routes, tmp_path, monkeypatch):
+    """When file shrinks AGAIN between first read and Range body transmission,
+    the captured snapshot (not re-read) is served — no header/body mismatch.
+    
+    Round-6 regression: Codex reproduced 206 advertised 4 / wrote 1.
+    """
+    target = tmp_path / "img.png"
+    target.write_bytes(b"0123456789")  # 10 bytes initially
+    
+    # Track reads to simulate shrink-again after first snapshot
+    read_calls = [0]
+    
+    def fake_read(fd, n):
+        read_calls[0] += 1
+        # First read: get 6 bytes (simulate first truncation)
+        if read_calls[0] == 1:
+            return b"012345"
+        # Any subsequent read: return only 1 byte (file shrank again)
+        # But with the fix, this should NEVER be called for body transmission
+        return b"x"
+    
+    monkeypatch.setattr("api.routes.os.read", fake_read)
+    
+    # Request Range: bytes=1-4 (4 bytes from offset 1)
+    handler, _ = _serve(
+        routes, target, "image/png", "private, no-cache",
+        headers={"Range": "bytes=1-4"},
+    )
+    
+    assert handler.status == 206
+    content_length = int(handler.header("Content-Length") or "0")
+    # Range requested 4 bytes from offset 1 of the 6-byte snapshot: "1234"
+    assert content_length == 4, f"Content-Length should be 4, got {content_length}"
+    assert len(handler.body) == 4, f"body should be 4 bytes, got {len(handler.body)}"
+    assert handler.body == b"1234", "body should be snapshot[1:5]"
+    assert content_length == len(handler.body), \
+        f"Content-Length {content_length} != body {len(handler.body)}"
+

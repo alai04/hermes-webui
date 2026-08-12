@@ -18497,8 +18497,11 @@ def _etag_and_snapshot(fd, *, file_size: int) -> tuple[str | None, bytes | None,
 
     # If the file was truncated after fstat (short snapshot), return the actual
     # size but no ETag — caller will fall back to streaming without ETag.
+    # Round-6 fix: keep the captured `data` so the body path serves the immutable
+    # snapshot instead of re-reading the fd after headers are committed.
+    # Content-Length derives from actual_size == len(data), so header/body match.
     if actual_size != file_size:
-        return None, None, actual_size
+        return None, data, actual_size
 
     return _bytes_etag(data), data, actual_size
 
