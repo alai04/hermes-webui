@@ -84,6 +84,8 @@ def test_partial_then_live_catalog_preserves_exact_custom_provider_model(tmp_pat
     assert payload["beforeLive"] == expected
     assert payload["afterLive"] == expected
     assert payload["appliedBare"] == "@custom:cpa:gpt-5.6-sol"
+    assert "@custom:cpa:gpt-5.6-sol" in payload["bareOptions"]
+    assert "@custom:cpa:jb/gpt-5.6-sol" in payload["bareOptions"]
     assert payload["qualifiedAfter"] == {
         "model": "jb/gpt-5.6-sol",
         "model_provider": "custom:cpa",

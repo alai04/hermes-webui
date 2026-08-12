@@ -3205,11 +3205,22 @@ function _findModelInDropdown(modelId, sel, preferredProviderId){
         if(routed.toLowerCase().startsWith(prefix)) routed=routed.slice(prefix.length);
         return routed.toLowerCase().replace(/-/g,'.');
       };
-      const providerMatch=options.find(o=>
-        _getOptionProviderId(o).toLowerCase()===preferred
-        &&routeNorm(o.value)===routeNorm(rawModel)
-      );
-      return providerMatch?providerMatch.value:null;
+      const providerOptions=options.filter(o=>_getOptionProviderId(o).toLowerCase()===preferred);
+      const providerMatch=providerOptions.find(o=>routeNorm(o.value)===routeNorm(rawModel));
+      if(providerMatch) return providerMatch.value;
+      // Legacy sessions may store only the bare suffix of a routed custom
+      // option. Preserve #6195's provider-hinted repair, but only for an
+      // explicit @provider: row; an unwrapped slash ID belongs to the active
+      // endpoint and must not substitute for a distinct bare model.
+      if(!rawModel.includes('/')&&!rawModel.startsWith('@')){
+        const prefix=`@${preferred}:`;
+        const suffixMatches=providerOptions.filter(o=>
+          String(o.value||'').toLowerCase().startsWith(prefix)
+          &&norm(o.value)===target
+        );
+        if(suffixMatches.length===1) return suffixMatches[0].value;
+      }
+      return null;
     }
     const providerMatch=options.find(o=>norm(o.value)===target&&_getOptionProviderId(o).toLowerCase()===preferred);
     if(providerMatch) return providerMatch.value;
