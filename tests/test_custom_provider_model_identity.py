@@ -90,3 +90,59 @@ def test_partial_then_live_catalog_preserves_exact_custom_provider_model(tmp_pat
         "model": "jb/gpt-5.6-sol",
         "model_provider": "custom:cpa",
     }
+
+
+# Ambiguity guard for the #6195 bare-id fallback (Codex round-2 SHOULD-FIX):
+# when two options under the same custom provider normalize to the same target,
+# the hinted-fallback must refuse to guess and return null rather than pick
+# an arbitrary one.
+_AMBIGUITY_DRIVER = r"""
+const fs=require('fs');
+const src=fs.readFileSync(process.argv[2],'utf8');
+function extract(name){
+  const start=src.indexOf('function '+name+'(');
+  if(start<0) throw new Error('missing '+name);
+  let i=src.indexOf('{',start), depth=0;
+  for(;i<src.length;i++){
+    if(src[i]==='{') depth++;
+    else if(src[i]==='}'&&--depth===0) return src.slice(start,i+1);
+  }
+  throw new Error('unterminated '+name);
+}
+function _getOptionProviderId(o){return o.providerId||'';}
+for(const name of ['_findModelInDropdown']) eval(extract(name));
+// Single unambiguous suffix match -> resolves to the existing namespaced option.
+const single={options:[
+  {value:'@custom:tok:z-ai/glm-5.2', providerId:'custom:tok'},
+  {value:'openai/gpt-4', providerId:'openai'},
+]};
+// Two same-provider options normalizing to the same target -> ambiguous.
+const ambiguous={options:[
+  {value:'@custom:tok:z-ai/glm-5.2', providerId:'custom:tok'},
+  {value:'@custom:tok:other/glm-5.2', providerId:'custom:tok'},
+]};
+console.log(JSON.stringify({
+  single:_findModelInDropdown('glm-5.2', single, 'custom:tok'),
+  ambiguous:_findModelInDropdown('glm-5.2', ambiguous, 'custom:tok'),
+  exact:_findModelInDropdown('z-ai/glm-5.2', single, 'custom:tok'),
+}));
+"""
+
+
+@pytest.mark.skipif(NODE is None, reason="node not in PATH")
+def test_hinted_bare_id_fallback_refuses_ambiguous_match(tmp_path):
+    driver = tmp_path / "amb_driver.js"
+    driver.write_text(_AMBIGUITY_DRIVER, encoding="utf-8")
+    result = subprocess.run(
+        [NODE, str(driver), str(UI_JS)], capture_output=True, text=True, timeout=30
+    )
+    assert result.returncode == 0, result.stderr
+    payload = json.loads(result.stdout)
+
+    # One unambiguous suffix match: the bare id resolves to the existing
+    # namespaced catalog option (#6195 repair preserved).
+    assert payload["single"] == "@custom:tok:z-ai/glm-5.2"
+    # Two same-normalized options under the same provider: refuse to guess.
+    assert payload["ambiguous"] is None
+    # Exact routed match is unaffected by the fallback path (#6944 fix intact).
+    assert payload["exact"] == "@custom:tok:z-ai/glm-5.2"
