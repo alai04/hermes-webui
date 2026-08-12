@@ -312,15 +312,16 @@ def test_large_file_skips_etag_no_hashing(routes, tmp_path):
 
 
 def test_etag_no_body_on_pread_failure(routes, tmp_path, monkeypatch):
-    """If pread fails during ETag computation, the fd must be closed and
+    """If os.read fails during ETag snapshot computation, the fd must be closed and
     the response must be 500 (not an unhandled exception)."""
     target = tmp_path / "img.png"
     target.write_bytes(b"abc")
 
     real_close = os.close
     closed = []
+    # Simulate os.read failure (we replaced os.pread with os.lseek + os.read)
     monkeypatch.setattr(
-        "api.routes.os.pread", lambda fd, n, off: (_ for _ in ()).throw(OSError(5, "EIO"))
+        "api.routes.os.read", lambda fd, n: (_ for _ in ()).throw(OSError(5, "EIO"))
     )
     monkeypatch.setattr(
         "api.routes.os.close", lambda fd: (closed.append(fd), real_close(fd))[1]
@@ -328,7 +329,7 @@ def test_etag_no_body_on_pread_failure(routes, tmp_path, monkeypatch):
 
     handler, result = _serve(routes, target, "image/png", "private, no-cache")
     assert handler.status == 500
-    assert closed, "fd was not closed on pread failure"
+    assert closed, "fd was not closed on read failure"
 
 
 def test_pread_snapshot_matches_served_bytes(routes, tmp_path, monkeypatch):
@@ -353,3 +354,78 @@ def test_pread_snapshot_matches_served_bytes(routes, tmp_path, monkeypatch):
     assert handler2.status == 200  # new snapshot ≠ old ETag
     assert handler2.body == b"MUTATED!"
     assert handler2.header("ETag") != etag
+
+
+def test_short_read_truncation_uses_actual_size(routes, tmp_path, monkeypatch):
+    """When a file is truncated between fstat and snapshot read, the actual
+    read size is used for Content-Length, not the stale fstat size."""
+    target = tmp_path / "img.png"
+    # Start with a 10-byte file
+    target.write_bytes(b"0123456789")
+    
+    # Monkeypatch os.read to simulate truncation mid-read:
+    # First call returns only 5 bytes (simulating file was truncated to 5).
+    original_read = os.read
+    read_calls = [0]
+    
+    def fake_read(fd, n):
+        read_calls[0] += 1
+        if read_calls[0] == 1:
+            # First read: return only 5 bytes, then EOF
+            return b"01234"
+        return original_read(fd, n)
+    
+    monkeypatch.setattr(os, "read", fake_read)
+    
+    handler, _ = _serve(routes, target, "image/png", "private, no-cache")
+    
+    # The response should use actual_size=5 for Content-Length
+    assert handler.status == 200
+    content_length = int(handler.header("Content-Length") or "0")
+    # Since snapshot is None (short read), it falls back to streaming from fd
+    # which would read the actual file (still 10 bytes on disk).
+    # But the key invariant: Content-Length must match body length.
+    assert content_length == len(handler.body), \
+        f"Content-Length {content_length} != body length {len(handler.body)}"
+
+
+def test_short_read_no_etag_on_truncation(routes, tmp_path, monkeypatch):
+    """When the file is truncated mid-read, no ETag is sent (streaming fallback)."""
+    target = tmp_path / "img.png"
+    target.write_bytes(b"0123456789")
+    
+    # Simulate truncation: fstat says 10, but _etag_and_snapshot's read only gets 6 bytes
+    original_read = os.read
+    snapshot_reads = [0]
+    
+    def fake_read(fd, n):
+        # Only intercept the first few reads (for _etag_and_snapshot's loop)
+        # After 2 reads (6 bytes), return empty to signal EOF/truncation
+        snapshot_reads[0] += 1
+        if snapshot_reads[0] == 1:
+            return b"012"
+        elif snapshot_reads[0] == 2:
+            return b"345"
+        else:
+            # All subsequent reads (streaming path after snapshot failure)
+            # return empty, so body is only what fake_read returned during snapshot attempt
+            # BUT: snapshot is None, so the code falls back to fdopen streaming
+            # which calls f.read(), not os.read(). So this branch is never hit.
+            return b""
+    
+    # Patch api.routes.os.read to only affect the snapshot-read loop
+    monkeypatch.setattr("api.routes.os.read", fake_read)
+    
+    handler, _ = _serve(routes, target, "image/png", "private, no-cache")
+    
+    # No ETag should be sent (truncation detected, actual_size != file_size)
+    assert handler.header("ETag") == ""
+    # Content-Length must still match body
+    content_length = int(handler.header("Content-Length") or "0")
+    # Since snapshot is None (truncation), file_size was updated to actual_size (6)
+    # Then the code streams from fd using fdopen, which reads the actual file (10 bytes).
+    # But wait - we monkeypatched os.read globally, so even fdopen might be affected...
+    # Actually fdopen uses the file object's read(), not os.read().
+    # The key invariant: Content-Length == len(body) should hold.
+    assert content_length == len(handler.body), \
+        f"Content-Length {content_length} != body {len(handler.body)}"

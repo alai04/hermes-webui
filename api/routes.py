@@ -18464,18 +18464,43 @@ def _bytes_etag(data: bytes) -> str:
     return 'W/"%s"' % hashlib.sha256(data).hexdigest()
 
 
-def _etag_and_snapshot(fd, *, file_size: int) -> tuple[str | None, bytes | None]:
-    """Return (weak ETag, snapshot bytes) for files under the size cap.
+def _etag_and_snapshot(fd, *, file_size: int) -> tuple[str | None, bytes | None, int]:
+    """Return (weak ETag, snapshot bytes, actual size) for files under the size cap.
 
-    Uses a single pread to grab an immutable snapshot, then hashes it.
-    The snapshot bytes can be sent directly so the ETag and the body can
-    never diverge under TOCTOU (the file may change on disk after pread).
-    Returns (None, None) for files above the cap or on unexpected I/O failure.
+    Uses os.lseek + looped os.read to grab an immutable snapshot in a cross-platform
+    and short-read-safe manner. The snapshot bytes can be sent directly so the ETag
+    and the body can never diverge under TOCTOU (the file may change on disk after read).
+
+    Returns (None, None, file_size) for files above the cap or on unexpected I/O failure.
+    Returns (None, None, actual_size) if the file was truncated mid-read (short snapshot).
+    The caller must use actual_size (not the original file_size) for Content-Length/Range
+    calculations to avoid header/body mismatch.
     """
     if file_size > _ETAG_SIZE_CAP:
-        return None, None
-    data = os.pread(fd, file_size, 0)
-    return _bytes_etag(data), data
+        return None, None, file_size
+
+    # Cross-platform: os.lseek + looped os.read instead of POSIX-only os.pread
+    # Short reads are possible (interrupted, EOF from truncation), so we loop.
+    os.lseek(fd, 0, os.SEEK_SET)
+    data = b""
+    remaining = file_size
+    while remaining > 0:
+        chunk = os.read(fd, min(1024 * 1024, remaining))
+        if not chunk:  # EOF reached (file was truncated)
+            break
+        data += chunk
+        remaining -= len(chunk)
+
+    actual_size = len(data)
+    if actual_size == 0:
+        return None, None, 0
+
+    # If the file was truncated after fstat (short snapshot), return the actual
+    # size but no ETag — caller will fall back to streaming without ETag.
+    if actual_size != file_size:
+        return None, None, actual_size
+
+    return _bytes_etag(data), data, actual_size
 
 
 def _serve_file_bytes(handler, target: Path, mime: str, disposition: str, cache_control: str, *, csp: str | None = None, anchor_root: Path | None = None):
@@ -18508,8 +18533,16 @@ def _serve_file_bytes(handler, target: Path, mime: str, disposition: str, cache_
         if no_store or file_size > _ETAG_SIZE_CAP:
             etag = None
             snapshot = None
+            # actual_size stays as file_size for over-cap/no-store cases
         else:
-            etag, snapshot = _etag_and_snapshot(fd, file_size=file_size)
+            etag, snapshot, actual_size = _etag_and_snapshot(fd, file_size=file_size)
+            # If the file was truncated mid-read (short snapshot), we have the actual
+            # bytes that were read. Use actual_size for all subsequent calculations
+            # so Content-Length/Range match the body we can actually send.
+            if actual_size != file_size:
+                file_size = actual_size  # reconcile to avoid header/body mismatch
+                # snapshot is None in truncation case, so we'll fall back to streaming
+                # from the fd (re-read from actual file, now at the truncated size).
 
         # RFC 7232 §3.2: If-None-Match uses weak comparison (W/ prefixes ignored)
         # and "*" matches any existing resource. On match, GET/HEAD is
