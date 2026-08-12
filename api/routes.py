@@ -18532,20 +18532,29 @@ def _serve_file_bytes(handler, target: Path, mime: str, disposition: str, cache_
         return bad(handler, "Could not stat file", 500)
 
     try:
-        no_store = "no-store" in cache_control
-        if no_store or file_size > _ETAG_SIZE_CAP:
-            etag = None
-            snapshot = None
-            # actual_size stays as file_size for over-cap/no-store cases
-        else:
-            etag, snapshot, actual_size = _etag_and_snapshot(fd, file_size=file_size)
-            # If the file was truncated mid-read (short snapshot), we have the actual
-            # bytes that were read. Use actual_size for all subsequent calculations
-            # so Content-Length/Range match the body we can actually send.
-            if actual_size != file_size:
-                file_size = actual_size  # reconcile to avoid header/body mismatch
-                # snapshot is None in truncation case, so we'll fall back to streaming
-                # from the fd (re-read from actual file, now at the truncated size).
+        # Pre-commit phase: ETag/snapshot computation and response selection.
+        # OSError here is still convertible into a clean 500 because no
+        # status line has been written yet. After end_headers() the response
+        # is committed, so body-transmission errors must never call bad()
+        # again (that would attempt a second send_response on a stream the
+        # client may have already closed — see the body phase below).
+        try:
+            no_store = "no-store" in cache_control
+            if no_store or file_size > _ETAG_SIZE_CAP:
+                etag = None
+                snapshot = None
+                # actual_size stays as file_size for over-cap/no-store cases
+            else:
+                etag, snapshot, actual_size = _etag_and_snapshot(fd, file_size=file_size)
+                # If the file was truncated mid-read (short snapshot), use the
+                # actual read size for all subsequent calculations so
+                # Content-Length/Range match the body we can actually send.
+                # Round-6 fix: the captured bytes are kept, so the body path
+                # serves the immutable snapshot instead of re-reading the fd.
+                if actual_size != file_size:
+                    file_size = actual_size  # reconcile to avoid header/body mismatch
+        except OSError:
+            return bad(handler, "Could not serve file", 500)
 
         # RFC 7232 §3.2: If-None-Match uses weak comparison (W/ prefixes ignored)
         # and "*" matches any existing resource. On match, GET/HEAD is
@@ -18603,11 +18612,16 @@ def _serve_file_bytes(handler, target: Path, mime: str, disposition: str, cache_
             _security_headers(handler)
         handler.end_headers()
 
+        # Body transmission: the response is committed once end_headers()
+        # returns, so attempting bad()/send_response again here would corrupt
+        # the stream with a second status line. Client disconnects are normal
+        # (tab close, network switch) — log at debug and stop, same contract
+        # as _safe_write(). Never emit a 500 after headers are out.
         if content_length:
-            if snapshot is not None:
-                handler.wfile.write(snapshot[start:start + content_length])
-            else:
-                try:
+            try:
+                if snapshot is not None:
+                    handler.wfile.write(snapshot[start:start + content_length])
+                else:
                     with os.fdopen(fd, "rb", closefd=True) as f:
                         fd = None
                         f.seek(start)
@@ -18618,11 +18632,13 @@ def _serve_file_bytes(handler, target: Path, mime: str, disposition: str, cache_
                                 break
                             handler.wfile.write(chunk)
                             remaining -= len(chunk)
-                except PermissionError:
-                    return True
+            except _CLIENT_DISCONNECT_ERRORS as exc:
+                logging.getLogger("hermes.webui").debug(
+                    "Client disconnected mid-response (%s): %s",
+                    type(exc).__name__,
+                    getattr(handler, "path", "?"),
+                )
         return True
-    except OSError:
-        return bad(handler, "Could not serve file", 500)
     finally:
         _close_fd_quietly(fd)
 

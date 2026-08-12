@@ -507,3 +507,61 @@ def test_shrink_again_during_body_transmission_range_206(routes, tmp_path, monke
     assert content_length == len(handler.body), \
         f"Content-Length {content_length} != body {len(handler.body)}"
 
+
+
+# ── Post-commit body transmission: client disconnect must not double-respond ─
+
+class _DisconnectAfterHeadersHandler(_FakeHandler):
+    """Fake handler whose writer raises BrokenPipeError once the response is
+    committed, simulating a client that disconnects mid-body."""
+
+    def __init__(self, headers=None):
+        super().__init__(headers)
+        self.send_response_calls: list[int] = []
+        self.headers_ended = False
+
+    def send_response(self, code):
+        self.send_response_calls.append(code)
+        super().send_response(code)
+
+    def end_headers(self):
+        self.headers_ended = True
+
+    def write(self, data):
+        raise BrokenPipeError()
+
+
+def test_disconnect_mid_body_snapshot_no_second_response(routes, tmp_path):
+    """Client disconnects while the snapshot body is written: the 200 is
+    already committed, so no second 500 may be attempted afterwards."""
+    target = tmp_path / "img.png"
+    target.write_bytes(b"payload")
+    handler = _DisconnectAfterHeadersHandler()
+    result = routes._serve_file_bytes(
+        handler, target, "image/png", "inline", "private, no-cache"
+    )
+
+    assert handler.status == 200
+    assert handler.send_response_calls == [200], (
+        f"exactly one status expected, got {handler.send_response_calls}"
+    )
+    assert handler.headers_ended
+    assert result is True
+
+
+def test_disconnect_mid_body_stream_no_second_response(routes, tmp_path):
+    """Client disconnects while an over-cap (no-ETag) file is streamed:
+    exactly one 200 status, never a trailing 500."""
+    target = tmp_path / "big.bin"
+    target.write_bytes(b"X" * (10 * 1024 * 1024 + 1))  # _ETAG_SIZE_CAP + 1
+    handler = _DisconnectAfterHeadersHandler()
+    result = routes._serve_file_bytes(
+        handler, target, "application/octet-stream", "inline", "private, no-cache"
+    )
+
+    assert handler.status == 200
+    assert handler.send_response_calls == [200], (
+        f"exactly one status expected, got {handler.send_response_calls}"
+    )
+    assert handler.headers_ended
+    assert result is True
