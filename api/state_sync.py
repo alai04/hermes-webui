@@ -198,12 +198,18 @@ def sync_session_usage(session_id: str, input_tokens: int=0, output_tokens: int=
 
 
 def sync_session_title(session_id: str, title: str, profile: Optional[str] = None) -> None:
-    """Sync a generated title to state.db unconditionally (not gated by sync_to_insights).
+    """Sync an auto-generated title to state.db (not gated by sync_to_insights).
 
     Background title generation writes the title to the WebUI sidecar JSON but
     not to hermes-agent's state.db, so ``hermes sessions list`` shows blank
     titles for WebUI sessions.  This function bridges that gap and is called
     from the background title update/refresh paths after a title is persisted.
+
+    Uses ``set_auto_title_if_empty`` so it will only populate a NULL title and
+    never overwrite a manual rename made via CLI/Gateway/TUI.  This means
+    title refreshes (where state.db already holds the initial auto-title) are
+    effectively no-ops at the state.db layer -- acceptable because the primary
+    goal is ensuring ``hermes sessions list`` is not blank.
     """
     if not title:
         return
@@ -213,7 +219,7 @@ def sync_session_title(session_id: str, title: str, profile: Optional[str] = Non
     try:
         # Ensure the session row exists (idempotent) so the UPDATE has a target.
         db.ensure_session(session_id=session_id, source='webui')
-        db.set_session_title(session_id, title)
+        db.set_auto_title_if_empty(session_id, title)
     except Exception:
         logger.debug("Failed to sync session title to state.db for %s", session_id)
     finally:

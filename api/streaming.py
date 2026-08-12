@@ -4483,7 +4483,7 @@ def _run_background_title_update(session_id: str, user_text: str, assistant_text
             # Sync the generated title to state.db so `hermes sessions list` shows it.
             try:
                 from api.state_sync import sync_session_title
-                sync_session_title(session_id, effective_title, profile=getattr(s, 'profile', None))
+                sync_session_title(session_id, effective_title, profile=getattr(s, 'profile', None) or 'default')
             except Exception:
                 logger.debug("Failed to sync title to state.db after generation for %s", session_id)
         else:
@@ -4561,7 +4561,7 @@ def _run_background_title_refresh(session_id: str, user_text: str, assistant_tex
         # Sync the refreshed title to state.db so `hermes sessions list` stays current.
         try:
             from api.state_sync import sync_session_title
-            sync_session_title(session_id, effective_title, profile=getattr(s, 'profile', None))
+            sync_session_title(session_id, effective_title, profile=getattr(s, 'profile', None) or 'default')
         except Exception:
             logger.debug("Failed to sync refreshed title to state.db for %s", session_id)
         logger.info("Adaptive title refresh: session=%s new_title=%r", session_id, effective_title)
