@@ -3195,7 +3195,23 @@ function _findModelInDropdown(modelId, sel, preferredProviderId){
   }
   const preferred=String(preferredProviderId||explicitProvider||'').toLowerCase();
   if(preferred){
-    const providerMatch=options.find(o=>norm(o.value)===target && _getOptionProviderId(o).toLowerCase()===preferred);
+    if(preferred==='custom'||preferred.startsWith('custom:')){
+      // A slash is part of a custom endpoint's upstream model ID, not a
+      // provider namespace. Match the exact routed ID (allowing only the
+      // WebUI's @provider: wrapper and dash/dot spelling compatibility).
+      const routeNorm=value=>{
+        let routed=String(value||'');
+        const prefix=`@${preferred}:`;
+        if(routed.toLowerCase().startsWith(prefix)) routed=routed.slice(prefix.length);
+        return routed.toLowerCase().replace(/-/g,'.');
+      };
+      const providerMatch=options.find(o=>
+        _getOptionProviderId(o).toLowerCase()===preferred
+        &&routeNorm(o.value)===routeNorm(rawModel)
+      );
+      return providerMatch?providerMatch.value:null;
+    }
+    const providerMatch=options.find(o=>norm(o.value)===target&&_getOptionProviderId(o).toLowerCase()===preferred);
     if(providerMatch) return providerMatch.value;
   }
   // 2. Normalized match — but ONLY when unambiguous. If the bare id
