@@ -16842,13 +16842,17 @@ function renderMessages(options){
         if(_ERR_MSG_RE.test(String(partDisplayText||'').trim())) orderedSeg.dataset.error='1';
         if(!firstSeg&&thinkingText&&window._showThinking!==false&&!((isCompactWorklogMode()||isTransparentStream())&&_assistantThinkingBelongsInWorklog(m, rawIdx, toolCallAssistantIdxs))) orderedSeg.insertAdjacentHTML('beforeend', _thinkingCardHtml(thinkingText));
         const isLastTextPart=partIdx===lastTextPartIdx;
-        const partBodyHtml=(m && m._media_snapshots && typeof m._media_snapshots==='object')
-          ? _stampMediaSnapshots(_getCachedRender(partDisplayText,false), m._media_snapshots)
-          : _getCachedRender(partDisplayText,false);
+        const partBodyHtml=_getCachedRender(partDisplayText,false);
+        // Message-level media snapshots: transparent ordered segments carry the
+        // same per-message path→digest map as the main transcript; stamp it so
+        // historical previews freeze (&snap=) instead of following overwrites.
+        const partBodyHtmlStamped=(m && m._media_snapshots && typeof m._media_snapshots==='object')
+          ? _stampMediaSnapshots(partBodyHtml, m._media_snapshots)
+          : partBodyHtml;
         if(isLastTextPart&&statusHtml){
           orderedSeg.insertAdjacentHTML('beforeend', statusHtml);
         }
-        orderedSeg.insertAdjacentHTML('beforeend', `${isLastTextPart?filesHtml:''}<div class="msg-body">${partBodyHtml}</div>${isLastTextPart?footHtml:''}`);
+        orderedSeg.insertAdjacentHTML('beforeend', `${isLastTextPart?filesHtml:''}<div class="msg-body">${partBodyHtmlStamped}</div>${isLastTextPart?footHtml:''}`);
         blocks.appendChild(orderedSeg);
         if(!firstSeg) firstSeg=orderedSeg;
       });

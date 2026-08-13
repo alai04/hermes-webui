@@ -143,25 +143,14 @@ def test_media_capture_allowed_denies_hermes_state(tmp_path, monkeypatch):
     allowed.write_text("x")
     assert media_capture_allowed(allowed) is True
 
-    # ...but Hermes-internal state filenames are never snapshotted.
+    # ...but a deny-listed filename under a Hermes root is never snapshotted.
+    # Point HOME at the fake tree so <fake-home>/.hermes counts as a root.
     hermes_home = tmp_path / ".hermes"
     hermes_home.mkdir()
     secret = hermes_home / "settings.json"
     secret.write_text("{}")
     monkeypatch.setenv("HOME", str(tmp_path))
-    from api.media_snapshots import _allowed_roots_for_capture
-
-    # Force the root list to include our fake home so the deny path runs.
-    roots_before = _allowed_roots_for_capture()
-    try:
-        # Re-import with env pointing at fake home is not possible in-process;
-        # instead assert the deny predicate directly on the filename.
-        assert media_capture_allowed(secret) is False or True  # root-dependent
-    finally:
-        pass
-    # The deny FILENAME check is independent of roots: settings.json under a
-    # hermes root is denied whenever that root is allowed.
-    assert not media_capture_allowed(secret) or True
+    assert media_capture_allowed(secret) is False
 
 
 # ── annotate_media_snapshots ───────────────────────────────────────────────
@@ -299,8 +288,6 @@ def test_handle_media_denies_direct_store_path(routes, monkeypatch, tmp_path):
     # Simulate the production layout: the store lives under a Hermes root, with
     # HOME pointing at tmp_path so that directory counts as a Hermes root. The
     # #3234 deny list denies <hermes_root>/media_snapshots.
-    import api.media_snapshots as ms
-
     hermes_home = tmp_path / ".hermes"
     store = hermes_home / "media_snapshots"
     monkeypatch.setenv("HOME", str(tmp_path))
@@ -468,7 +455,11 @@ def test_frontend_stamp_source_invariants():
     src = open(ROOT / "static" / "ui.js", encoding="utf-8").read()
     # Main transcript path and transparent ordered segments must stamp.
     assert "_stampMediaSnapshots(bodyHtml, m._media_snapshots)" in src
-    assert "_stampMediaSnapshots(_getCachedRender(partDisplayText,false), m._media_snapshots)" in src
+    # Transparent segments: original _getCachedRender line is preserved (source
+    # window contract), stamping applied on the next line via *_Stamped.
+    assert "_getCachedRender(partDisplayText,false);" in src
+    assert "partBodyHtmlStamped" in src
+    assert "_stampMediaSnapshots(partBodyHtml, m._media_snapshots)" in src
     # Worklog scene prose path must stamp via the owner message's map.
     assert "_anchorSceneOwnerMediaSnapshots" in src
     # Lazy loaders must read the stamped digest.
