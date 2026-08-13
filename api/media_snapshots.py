@@ -24,8 +24,15 @@ stored bytes instead of the live file.
 
 Security model
 --------------
-* Digests are validated against ``^[0-9a-f]{64}$`` before any path is built —
-  a crafted ``snap=`` value cannot traverse out of the store.
+* Digests are validated by whole-string ``fullmatch`` against ``[0-9a-f]{64}``
+  before any path is built — a crafted ``snap=`` value cannot traverse out of
+  the store.
+* Capture uses the SAME deny predicate as the ``/api/media`` serve path
+  (``routes._media_deny_reason``): anything the endpoint refuses to serve is
+  never captured in the first place.
+* Every captured digest carries a server-owned source-path binding; a digest
+  is only ever served back for the exact canonical path it was captured from,
+  so it can never act as a bearer capability through a different allowed path.
 * The store lives under STATE_DIR; capture is restricted to files that are
   regular files within caller-approved roots (the caller reuses the same
   allow-list reasoning as ``/api/media`` — this module never decides what a
@@ -46,6 +53,7 @@ Caps
 from __future__ import annotations
 
 import hashlib
+import json
 import logging
 import os
 import re
@@ -54,7 +62,9 @@ from pathlib import Path
 
 logger = logging.getLogger("hermes.webui")
 
-_DIGEST_RE = re.compile(r"^[0-9a-f]{64}$")
+# Strict whole-string shape.  ``\\Z`` (not ``$``) so a terminal newline cannot
+# sneak past the gate; ``fullmatch`` is used at call sites.
+_DIGEST_RE = re.compile(r"[0-9a-f]{64}\Z")
 
 # Default caps.  Overridable via env var for operators with unusual disks.
 DEFAULT_MAX_FILE_BYTES = 50 * 1024 * 1024          # 50 MB per snapshot
@@ -66,23 +76,45 @@ _SNAPSHOT_DIR_ENV = "HERMES_WEBUI_MEDIA_SNAPSHOT_DIR"
 # two concurrent settles cannot race the same tmp file or the quota scan.
 _LOCK = threading.Lock()
 
-# Internal state filenames/subdirs that must never be snapshotted even when
-# they sit under an otherwise-allowed root.  Mirrors the #3234 deny list in
-# routes.py ``_handle_media`` — capture is intentionally NARROWER than serve:
-# a file that fails this predicate simply degrades to the live-file preview,
-# so erring on the deny side can never expose bytes the endpoint would not
-# already serve.
-_DENY_FILENAMES = {
-    "settings.json", "state.db", "state.db-wal", "state.db-shm",
-    "auth.json", "auth.lock", "config.yaml", "config.yml", ".env",
-    ".signing_key", ".pbkdf2_key", ".sessions.json",
-    "google_token.json", "google_client_secret.json",
-    "gateway_state.json", "channel_directory.json", "jobs.json",
-    "passkeys.json", ".passkey_challenges.json", ".login_attempts.json",
-}
-_DENY_SUBDIRS = (
-    "sessions", "memories", "cron", "logs", "checkpoints", "backups",
-)
+def media_capture_allowed(path: Path) -> bool:
+    """Allow-list predicate for snapshot capture (same gate as serve).
+
+    True only when ``path`` is a regular file inside an allowed root and NOT
+    inside a denied Hermes-internal state location.  The deny half is the
+    SAME predicate the ``/api/media`` serve path uses (``routes._media_deny_reason``,
+    the #3234 state/profile deny set): anything the endpoint would refuse to
+    serve is never captured in the first place — capture and serve can never
+    diverge on what is denied.  Any failure mode returns False —
+    snapshotting is best-effort durability, never a reason to widen file
+    access.
+    """
+    import stat as stat_mod
+
+    try:
+        resolved = path.resolve()
+        st = resolved.stat()
+    except OSError:
+        return False
+    if not stat_mod.S_ISREG(st.st_mode):
+        return False
+
+    within_any_root = any(
+        _path_within(resolved, root) for root in _allowed_roots_for_capture()
+    )
+    if not within_any_root:
+        return False
+    # Authoritative deny parity with the serve path (#6979 Round 2 MUST-FIX 1):
+    # STATE_DIR subdirs, webui_state subdirs, named-profile roots, secret
+    # basenames and the snapshot store itself are all denied exactly as the
+    # route denies them.
+    try:
+        from api.routes import _media_deny_reason
+
+        if _media_deny_reason(resolved):
+            return False
+    except Exception:
+        return False  # fail closed: never snapshot when the gate is unclear
+    return True
 
 
 def _allowed_roots_for_capture() -> list[Path]:
@@ -126,39 +158,6 @@ def _path_within(child: Path, root: Path) -> bool:
         return True
     except (ValueError, OSError):
         return False
-
-
-def media_capture_allowed(path: Path) -> bool:
-    """Allow-list predicate for snapshot capture (stricter than serve).
-
-    True only when ``path`` is a regular file inside an allowed root and NOT
-    inside a denied Hermes-internal state subdir/filename.  Any failure mode
-    returns False — snapshotting is best-effort durability, never a reason to
-    widen file access.
-    """
-    import stat as stat_mod
-
-    try:
-        resolved = path.resolve()
-        st = resolved.stat()
-    except OSError:
-        return False
-    if not stat_mod.S_ISREG(st.st_mode):
-        return False
-
-    within_any_root = False
-    for root in _allowed_roots_for_capture():
-        if _path_within(resolved, root):
-            within_any_root = True
-            # Denied state subdirs fire even inside a root — a workspace
-            # pointed at a state dir must not get its sessions snapshotted.
-            for sub in _DENY_SUBDIRS:
-                deny_dir = (root / sub).resolve()
-                if _path_within(resolved, deny_dir):
-                    return False
-            if resolved.name.casefold() in {n.casefold() for n in _DENY_FILENAMES}:
-                return False
-    return within_any_root
 
 
 def resolve_media_ref(raw_ref: str) -> Path | None:
@@ -206,8 +205,15 @@ def get_snapshot_dir() -> Path:
 
 
 def is_valid_digest(digest: str) -> bool:
-    """Strict digest shape check — the ONLY gate before path construction."""
-    return bool(_DIGEST_RE.match(str(digest or "")))
+    """Strict digest shape check — the ONLY gate before path construction.
+
+    ``fullmatch`` with a ``\\Z``-anchored pattern: ``$`` would also match
+    before a terminal newline, letting ``<64 hex>\\n`` slip through.
+    """
+    try:
+        return _DIGEST_RE.fullmatch(str(digest or "")) is not None
+    except (TypeError, ValueError):
+        return False
 
 
 def snapshot_path_for_digest(digest: str) -> Path | None:
@@ -220,6 +226,62 @@ def snapshot_path_for_digest(digest: str) -> Path | None:
         return None
     candidate = get_snapshot_dir() / f"{digest}.snap"
     return candidate if candidate.is_file() else None
+
+
+def _binding_path_for_digest(digest: str) -> Path:
+    """Sidecar holding the source-path set for a digest (``<digest>.src.json``)."""
+    return get_snapshot_dir() / f"{digest}.src.json"
+
+
+def _record_source_binding(digest: str, source: Path) -> None:
+    """Persist the server-owned canonical source-path ↔ digest association.
+
+    A digest is only ever served back for the EXACT path it was captured from
+    (see :func:`snapshot_servable_for_path`): a digest must never become a
+    bearer capability readable through any other allowed path.  The sidecar is
+    a tiny path list, rewritten tmp+rename atomically.  Caller holds
+    ``_LOCK`` (capture is serialized), so concurrent settles cannot race it.
+    """
+    try:
+        binding_file = _binding_path_for_digest(digest)
+        sources: set[str] = set()
+        try:
+            data = json.loads(binding_file.read_text(encoding="utf-8"))
+            sources = set(data.get("sources", []))
+        except (OSError, ValueError, TypeError):
+            sources = set()
+        sources.add(str(Path(source).resolve()))
+        tmp = binding_file.with_name(binding_file.name + ".tmp")
+        tmp.write_text(
+            json.dumps({"digest": digest, "sources": sorted(sources)}, sort_keys=True),
+            encoding="utf-8",
+        )
+        os.replace(tmp, binding_file)
+    except OSError as exc:
+        logger.debug("media snapshot source binding failed for %s: %s", source, exc)
+
+
+def snapshot_servable_for_path(digest: str, target: Path) -> bool:
+    """True only when ``digest`` was captured from canonical path ``target``.
+
+    Serve-side half of the source-path binding (#6979 Round 2 MUST-FIX 1):
+    the snapshot branch serves a digest only for the exact authorized path it
+    was captured from, so replaying a digest through a different (allowed)
+    path can never read stored bytes the normal ``path=`` gate would refuse.
+    A missing/invalid sidecar returns False — the caller falls back to the
+    live file.
+    """
+    if not is_valid_digest(digest):
+        return False
+    try:
+        want = str(target.resolve())
+    except OSError:
+        return False
+    try:
+        data = json.loads(_binding_path_for_digest(digest).read_text(encoding="utf-8"))
+    except (OSError, ValueError, TypeError):
+        return False
+    return want in set(data.get("sources", []))
 
 
 def _total_cap_bytes() -> int:
@@ -273,6 +335,11 @@ def _enforce_quota_locked(directory: Path) -> None:
             path.unlink()
             total -= size
             logger.info("media snapshot quota: evicted %s (%d bytes)", path.name, size)
+            # Drop the digest's source-binding sidecar with its blob.
+            try:
+                _binding_path_for_digest(path.stem).unlink()
+            except OSError:
+                pass
         except OSError as exc:
             logger.debug("media snapshot eviction failed for %s: %s", path, exc)
 
@@ -331,6 +398,9 @@ def capture_snapshot(source: Path, *, max_file_bytes: int | None = None) -> str 
             else:
                 os.replace(tmp_path, final_path)
             tmp_path = None
+            # Server-owned source-path binding: this digest may only be served
+            # back for THIS canonical path (see snapshot_servable_for_path).
+            _record_source_binding(hex_digest, source)
             _enforce_quota_locked(directory)
             return hex_digest
         except OSError as exc:
@@ -354,7 +424,10 @@ def annotate_media_snapshots(
     Writes a ``_media_snapshots`` dict ({absolute path: digest}) onto each
     assistant message that carries at least one local-file ``MEDIA:`` ref.
     Messages whose refs are already fully annotated are skipped (idempotent
-    across repeated settles).
+    across repeated settles).  A recorded digest is FINAL: even if its blob is
+    later evicted by quota, a re-settle must not re-capture the CURRENT live
+    bytes and silently rebind the historical message — evicted blobs degrade
+    to live-file serving instead (#6979 Round 2 SHOULD-FIX).
 
     ``resolve_ref(raw_ref) -> Path | None`` maps a raw MEDIA token to an
     absolute file path (defaults to :func:`resolve_media_ref`); refs it cannot
@@ -401,7 +474,13 @@ def annotate_media_snapshots(
             keys = [str(path)]
             if raw_ref not in keys:
                 keys.append(raw_ref)
-            pending = [k for k in keys if not (snaps.get(k) and is_valid_digest(snaps[k]) and snapshot_path_for_digest(snaps[k]))]
+            # A recorded digest is FINAL once stamped (blob presence is NOT
+            # re-checked): quota eviction must not cause a re-settle to
+            # re-capture the current live bytes and rebind the historical
+            # message — that would defeat per-message immutability and thrash
+            # the store with re-capture I/O. Evicted blobs simply fall back to
+            # live-file serving on the serve side.
+            pending = [k for k in keys if not (snaps.get(k) and is_valid_digest(snaps[k]))]
             if not pending:
                 continue  # already stored under every key — zero-I/O fast path
             if allowed_predicate is not None:

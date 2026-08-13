@@ -1530,22 +1530,35 @@ function _getCachedRender(text, isUser){
 function _stampMediaSnapshots(html, snaps){
   if(!html || !snaps || typeof snaps !== 'object') return html;
   let out = String(html);
-  for(const rawPath in snaps){
-    const digest = snaps[rawPath];
-    if(typeof digest !== 'string' || !/^[0-9a-f]{64}$/.test(digest)) continue;
-    // Direct media URLs: api/media?path=<enc>  →  api/media?path=<enc>&snap=<d>
-    const encoded = 'api/media?path=' + encodeURIComponent(rawPath);
-    if(out.indexOf(encoded) !== -1){
-      out = out.split(encoded).join(encoded + '&snap=' + digest);
+  // Direct media URLs: rewrite each COMPLETE `path=` query value atomically.
+  // Value-level parsing (decode the whole value, exact map lookup) instead of
+  // substring split/join: when one path is a PREFIX of another
+  // (/tmp/a.png vs /tmp/a.png.backup) the naive rewrite corrupts the longer
+  // URL and drops its own digest. Matching is boundary-aware — the value runs
+  // to the next `&` separator or an attribute quote/whitespace — so nothing
+  // outside the value ever moves.
+  out = out.replace(/api\/media[?&]path=([^&"'\s<>]+)/g, (match, encodedPath)=>{
+    let decoded;
+    try{ decoded = decodeURIComponent(encodedPath); }
+    catch(e){ return match; }
+    const digest = snaps[decoded];
+    if(typeof digest === 'string' && /^[0-9a-f]{64}$/.test(digest)){
+      return match + '&snap=' + digest;
     }
-    // Lazy-preview placeholders (pdf/html/csv/diff/excalidraw): data-path is
-    // the raw path; the loader builds the fetch URL later, so carry the digest
-    // in a data-snap attribute instead.
-    const dataPath = 'data-path="' + esc(rawPath) + '"';
-    if(out.indexOf(dataPath) !== -1){
-      out = out.split(dataPath).join(dataPath + ' data-snap="' + digest + '"');
+    return match;
+  });
+  // Lazy-preview placeholders: data-path="<html-escaped raw path>" — match the
+  // complete attribute value, unescape HTML entities, then exact lookup (same
+  // prefix-safety: a longer path's attribute can never be partially matched).
+  const _unescapeHtml=(s)=>String(s||'').replace(/&quot;/g,'"').replace(/&#39;/g,"'").replace(/&lt;/g,'<').replace(/&gt;/g,'>').replace(/&amp;/g,'&');
+  out = out.replace(/data-path="([^"]*)"/g, (match, rawValue)=>{
+    const decoded = _unescapeHtml(rawValue);
+    const digest = snaps[decoded];
+    if(typeof digest === 'string' && /^[0-9a-f]{64}$/.test(digest)){
+      return match + ' data-snap="' + digest + '"';
     }
-  }
+    return match;
+  });
   return out;
 }
 function _currentMessageRenderWindowSize(){
@@ -19451,7 +19464,7 @@ function loadPdfInline(container){
         .then(r=>{if(!r.ok) throw new Error(r.status); return r.arrayBuffer();})
         .then(buf=>{
           if(buf.byteLength>PDF_MAX_SIZE){
-            const dlUrl=publicMediaUrl+'&download=1';
+            const dlUrl=publicMediaUrl+'&download=1'+snapQuery;
             el.outerHTML=`<div class="pdf-preview-fallback"><a class="msg-media-link" href="${dlUrl}" download="${esc(fname)}">📎 ${esc(fname)}</a><br><span style="color:var(--muted);font-size:12px">${t('pdf_too_large')}</span></div>`;
             return;
           }
@@ -19459,7 +19472,7 @@ function loadPdfInline(container){
         })
         .then(pdf=>{
           if(!pdf) return;
-          const dlUrl=publicMediaUrl+'&download=1';
+          const dlUrl=publicMediaUrl+'&download=1'+snapQuery;
           const total=pdf.numPages;
           const pagesLabel=total>1?` · ${total} pages`:'';
           const wrap=document.createElement('div');
@@ -19498,7 +19511,7 @@ function loadPdfInline(container){
           renderPage(1);
         })
         .catch(()=>{
-          const dlUrl=publicMediaUrl+'&download=1';
+          const dlUrl=publicMediaUrl+'&download=1'+snapQuery;
           el.outerHTML=`<div class="pdf-preview-fallback"><a class="msg-media-link" href="${dlUrl}" download="${esc(fname)}">📎 ${esc(fname)}</a><br><span style="color:var(--muted);font-size:12px">${t('pdf_error')}</span></div>`;
         });
     };
@@ -19518,7 +19531,7 @@ function loadPdfInline(container){
       window.addEventListener('pdfjs-ready',()=>{ _pdfjsReady=true; loadPdf(window._pdfjsLib); },{once:true});
       setTimeout(()=>{
         if(!_pdfjsReady){
-          const dlUrl=publicMediaUrl+'&download=1';
+          const dlUrl=publicMediaUrl+'&download=1'+snapQuery;
           if(el.parentNode){
             el.outerHTML=`<div class="pdf-preview-fallback"><a class="msg-media-link" href="${dlUrl}" download="${esc(fname)}">📎 ${esc(fname)}</a><br><span style="color:var(--muted);font-size:12px">${t('pdf_error')}</span></div>`;
           }
@@ -19546,16 +19559,16 @@ function loadHtmlInline(container){
       .then(r=>{if(!r.ok) throw new Error(r.status); return r.text();})
       .then(html=>{
         if(html.length>HTML_MAX_SIZE){
-          const openUrl=publicMediaUrl+'&inline=1';
+          const openUrl=publicMediaUrl+'&inline=1'+snapQuery;
           el.outerHTML=`<div class="html-preview-fallback"><a class="msg-media-link" href="${openUrl}" target="_blank" rel="noopener">📎 ${esc(fname)}</a><br><span style="color:var(--muted);font-size:12px">${t('html_too_large')}</span></div>`;
           return;
         }
-        const openUrl=publicMediaUrl+'&inline=1';
+        const openUrl=publicMediaUrl+'&inline=1'+snapQuery;
         const safeHtml=html.replace(/&/g,'&amp;').replace(/"/g,'&quot;').replace(/</g,'&lt;').replace(/>/g,'&gt;');
         el.outerHTML=`<div class="html-preview-wrap"><div class="html-preview-header"><span>${t('html_sandbox_label')}</span><a href="${openUrl}" target="_blank" rel="noopener" class="html-open-link">${t('html_open_full')} ↗</a></div><iframe srcdoc="${safeHtml}" sandbox="allow-scripts" class="html-preview-iframe" loading="lazy"></iframe></div>`;
       })
       .catch(()=>{
-        const dlUrl=publicMediaUrl+'&download=1';
+        const dlUrl=publicMediaUrl+'&download=1'+snapQuery;
         el.outerHTML=`<div class="html-preview-fallback"><a class="msg-media-link" href="${dlUrl}" download="${esc(fname)}">📎 ${esc(fname)}</a><br><span style="color:var(--muted);font-size:12px">${t('html_error')}</span></div>`;
       });
   });
