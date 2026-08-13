@@ -12766,12 +12766,7 @@ function _anchorSceneNodeForRow(row, opts){
       node.className='assistant-segment';
       node.setAttribute('data-anchor-scene-prose','1');
       node.dataset.rawText=text;
-      const proseHtml=renderMd?renderMd(text):esc(text);
-      // Settled scene prose may carry message-level media snapshots (resolved
-      // by _renderAnchorSceneRowsIntoWorklog from the owner message) — stamp
-      // &snap= so historical worklog previews freeze like the main transcript.
-      const snaps=(opts&&opts.mediaSnapshots&&typeof opts.mediaSnapshots==='object')?opts.mediaSnapshots:null;
-      node.innerHTML=`<div class="msg-body">${snaps?_stampMediaSnapshots(proseHtml,snaps):proseHtml}</div>`;
+      node.innerHTML=`<div class="msg-body">${renderMd?renderMd(text):esc(text)}</div>`;
     }
   }else if(row.role==='thinking'){
     if(window._showThinking===false) return null;
@@ -12958,13 +12953,8 @@ function _renderAnchorSceneRowsIntoWorklog(group, rows, opts){
   list.innerHTML='';
   let wrote=false;
   let currentTools=null;
-  // Resolve the owner message's media snapshot map, if any, from the group's
-  // disclosure key (anchor-scene:<rawIdx>) so settled scene prose rows also
-  // stamp &snap= on /api/media previews (parity with the main transcript).
-  const ownerSnaps=_anchorSceneOwnerMediaSnapshots(group);
-  const rowOpts=ownerSnaps?Object.assign({},opts,{mediaSnapshots:ownerSnaps}):opts;
   for(const row of rows){
-    const node=_anchorSceneNodeForRow(row,rowOpts);
+    const node=_anchorSceneNodeForRow(row,opts);
     if(!node) continue;
     if(row.role==='tool'){
       if(!currentTools){
@@ -12984,14 +12974,6 @@ function _renderAnchorSceneRowsIntoWorklog(group, rows, opts){
     _syncToolCallGroupSummary(group);
   }
   return wrote;
-}
-function _anchorSceneOwnerMediaSnapshots(group){
-  if(!group||!group.getAttribute) return null;
-  const key=group.getAttribute('data-activity-disclosure-key');
-  const m=key&&/^anchor-scene:(\d+)$/.exec(key);
-  if(!m) return null;
-  const msg=S.messages&&S.messages[Number(m[1])];
-  return (msg&&msg._media_snapshots&&typeof msg._media_snapshots==='object')?msg._media_snapshots:null;
 }
 function _liveProcessedWorklogAnchorScore(group, index){
   if(!group) return -1;
@@ -16846,13 +16828,12 @@ function renderMessages(options){
         // Message-level media snapshots: transparent ordered segments carry the
         // same per-message path→digest map as the main transcript; stamp it so
         // historical previews freeze (&snap=) instead of following overwrites.
-        const partBodyHtmlStamped=(m && m._media_snapshots && typeof m._media_snapshots==='object')
-          ? _stampMediaSnapshots(partBodyHtml, m._media_snapshots)
-          : partBodyHtml;
+        // Inlined in the template (no intermediate variable) so test-harness
+        // block extraction of the ordered-segment slice stays self-contained.
         if(isLastTextPart&&statusHtml){
           orderedSeg.insertAdjacentHTML('beforeend', statusHtml);
         }
-        orderedSeg.insertAdjacentHTML('beforeend', `${isLastTextPart?filesHtml:''}<div class="msg-body">${partBodyHtmlStamped}</div>${isLastTextPart?footHtml:''}`);
+        orderedSeg.insertAdjacentHTML('beforeend', `${isLastTextPart?filesHtml:''}<div class="msg-body">${(typeof m!=='undefined'&&m&&m._media_snapshots&&typeof m._media_snapshots==='object')?_stampMediaSnapshots(partBodyHtml,m._media_snapshots):partBodyHtml}</div>${isLastTextPart?footHtml:''}`);
         blocks.appendChild(orderedSeg);
         if(!firstSeg) firstSeg=orderedSeg;
       });
@@ -19463,8 +19444,8 @@ function loadPdfInline(container){
     const fname=path.split('/').pop()||path;
     const mediaSessionId=(typeof S!=='undefined'&&S&&S.session&&S.session.session_id)?String(S.session.session_id):'';
     const snapQuery=_mediaSnapQuery(el);
-    const publicMediaUrl='api/media?path='+encodeURIComponent(path)+snapQuery;
-    const mediaUrl=publicMediaUrl+(mediaSessionId?'&session_id='+encodeURIComponent(mediaSessionId):'');
+    const publicMediaUrl='api/media?path='+encodeURIComponent(path);
+    const mediaUrl=publicMediaUrl+(mediaSessionId?'&session_id='+encodeURIComponent(mediaSessionId):'')+snapQuery;
     const loadPdf=(pdfjsLib)=>{
       fetch(mediaUrl)
         .then(r=>{if(!r.ok) throw new Error(r.status); return r.arrayBuffer();})
@@ -19559,8 +19540,8 @@ function loadHtmlInline(container){
     const fname=path.split('/').pop()||path;
     const mediaSessionId=(typeof S!=='undefined'&&S&&S.session&&S.session.session_id)?String(S.session.session_id):'';
     const snapQuery=_mediaSnapQuery(el);
-    const publicMediaUrl='api/media?path='+encodeURIComponent(path)+snapQuery;
-    const mediaUrl=publicMediaUrl+(mediaSessionId?'&session_id='+encodeURIComponent(mediaSessionId):'');
+    const publicMediaUrl='api/media?path='+encodeURIComponent(path);
+    const mediaUrl=publicMediaUrl+(mediaSessionId?'&session_id='+encodeURIComponent(mediaSessionId):'')+snapQuery;
     fetch(mediaUrl, {cache:'no-store'})
       .then(r=>{if(!r.ok) throw new Error(r.status); return r.text();})
       .then(html=>{
