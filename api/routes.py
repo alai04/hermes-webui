@@ -18506,12 +18506,15 @@ def _etag_and_snapshot(fd, *, file_size: int) -> tuple[str | None, bytes | None,
     return _bytes_etag(data), data, actual_size
 
 
-def _serve_file_bytes(handler, target: Path, mime: str, disposition: str, cache_control: str, *, csp: str | None = None, anchor_root: Path | None = None):
+def _serve_file_bytes(handler, target: Path, mime: str, disposition: str, cache_control: str, *, csp: str | None = None, anchor_root: Path | None = None, download_name: str | None = None):
     """Serve a file with correct MIME/disposition and optional byte-range support.
 
     Supports conditional GET via If-None-Match (ETag) — when the ETag matches,
     the request is short-circuited with 304 so revalidating clients (e.g.
     `no-cache` responses) do not re-download unchanged files.
+
+    ``download_name`` overrides the Content-Disposition filename (used when
+    serving an immutable media snapshot whose on-disk name is a content digest).
     """
     fd = None
     try:
@@ -18597,7 +18600,7 @@ def _serve_file_bytes(handler, target: Path, mime: str, disposition: str, cache_
         if byte_range:
             handler.send_header("Content-Range", f"bytes {start}-{end}/{file_size}")
         handler.send_header("Cache-Control", cache_control)
-        handler.send_header("Content-Disposition", _content_disposition_value(disposition, target.name))
+        handler.send_header("Content-Disposition", _content_disposition_value(disposition, download_name or target.name))
         if csp:
             # Sandboxed inline HTML must remain frameable for workspace previews;
             # X-Frame-Options: DENY would block the iframe before CSP sandbox applies.
@@ -19469,6 +19472,10 @@ def _handle_media(handler, parsed):
     _DENY_SUBDIRS = (
         "sessions", "memories", "cron", "logs",
         "checkpoints", "backups",
+        # Content-addressed media snapshots (api/media_snapshots.py) are an
+        # internal store: digest bytes are only reachable through the validated
+        # `snap=` parameter, never as a bare `path=` request. (#media-snapshots)
+        "media_snapshots",
     )
     _state_dir = None
     try:
@@ -19609,10 +19616,9 @@ def _handle_media(handler, parsed):
     if not within_allowed and not session_media_allowed:
         return bad(handler, "Path not in allowed location", 403)
 
-    if not target.exists() or not target.is_file():
-        return j(handler, {"error": "not found"}, status=404)
-
-    # Determine MIME type
+    # Determine MIME type from the requested path's extension. Computed BEFORE
+    # the existence check because the requested file may have been overwritten
+    # or deleted while its message-level snapshot still exists below.
     ext = target.suffix.lower()
     mime = MIME_MAP.get(ext, "application/octet-stream")
 
@@ -19631,6 +19637,39 @@ def _handle_media(handler, parsed):
     ) else "attachment"
     # _serve_file_bytes sends Content-Security-Policy when csp is set.
     csp = "sandbox allow-scripts" if html_inline_ok else None
+
+    # ── Message-level snapshot serving (?snap=<sha256>) ─────────────────────
+    # Historical chat previews carry a content-addressed snapshot digest of the
+    # file as it existed when the message settled (see api/media_snapshots.py).
+    # Serving the frozen bytes instead of the live file means an in-place
+    # overwrite (same filename) no longer rewrites old previews — the user can
+    # still compare old vs new. The allow/deny checks above still gate the
+    # request: `snap` only selects WHICH bytes to serve for an already-
+    # authorized path; it never grants access to a path that would be denied
+    # without it. A missing/evicted snapshot falls back to the live file.
+    snap_digest = qs.get("snap", [""])[0].strip().lower()
+    snapshot_file = None
+    if snap_digest:
+        from api.media_snapshots import is_valid_digest, snapshot_path_for_digest
+
+        if is_valid_digest(snap_digest):
+            snapshot_file = snapshot_path_for_digest(snap_digest)
+    if snapshot_file is not None:
+        # Content-addressed and immutable: the digest IS the SHA-256 of the
+        # exact bytes, so the browser may cache forever and never revalidate.
+        return _serve_file_bytes(
+            handler,
+            snapshot_file,
+            mime,
+            disposition,
+            "private, max-age=31536000, immutable",
+            csp=csp,
+            download_name=target.name,
+        )
+
+    if not target.exists() or not target.is_file():
+        return j(handler, {"error": "not found"}, status=404)
+
     # HTML inline previews change frequently (agent edits + re-renders).
     # Use no-store so the browser always fetches fresh content, avoiding stale
     # previews that require a manual full-page refresh to update.

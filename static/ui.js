@@ -1514,6 +1514,40 @@ function _getCachedRender(text, isUser){
   _renderCache.set(key, rendered);
   return rendered;
 }
+// ── Message-level media snapshot stamping ─────────────────────────────────
+// /api/media serves a file's CURRENT bytes. Since ETag revalidation (#6922),
+// an in-place overwrite (same filename) also rewrites every historical chat
+// preview that referenced it — the old/new comparison is lost. At settle time
+// the backend freezes the bytes of each local-file MEDIA: reference into a
+// content-addressed store and stamps the message with
+// `_media_snapshots: {path: digest}`. This helper rewrites the rendered HTML
+// of ONE message to append `&snap=<digest>` to the matching /api/media URLs
+// (and `data-snap` on lazy-preview placeholders), so old previews keep
+// showing the file as it was when the message was emitted.
+// Runs AFTER the text-keyed render cache: the cache stays pure-text, and each
+// message stamps its own digests — two messages with identical text but
+// different snapshots (exactly the old/new case) resolve independently.
+function _stampMediaSnapshots(html, snaps){
+  if(!html || !snaps || typeof snaps !== 'object') return html;
+  let out = String(html);
+  for(const rawPath in snaps){
+    const digest = snaps[rawPath];
+    if(typeof digest !== 'string' || !/^[0-9a-f]{64}$/.test(digest)) continue;
+    // Direct media URLs: api/media?path=<enc>  →  api/media?path=<enc>&snap=<d>
+    const encoded = 'api/media?path=' + encodeURIComponent(rawPath);
+    if(out.indexOf(encoded) !== -1){
+      out = out.split(encoded).join(encoded + '&snap=' + digest);
+    }
+    // Lazy-preview placeholders (pdf/html/csv/diff/excalidraw): data-path is
+    // the raw path; the loader builds the fetch URL later, so carry the digest
+    // in a data-snap attribute instead.
+    const dataPath = 'data-path="' + esc(rawPath) + '"';
+    if(out.indexOf(dataPath) !== -1){
+      out = out.split(dataPath).join(dataPath + ' data-snap="' + digest + '"');
+    }
+  }
+  return out;
+}
 function _currentMessageRenderWindowSize(){
   return Math.max(
     MESSAGE_RENDER_WINDOW_DEFAULT,
@@ -12732,7 +12766,12 @@ function _anchorSceneNodeForRow(row, opts){
       node.className='assistant-segment';
       node.setAttribute('data-anchor-scene-prose','1');
       node.dataset.rawText=text;
-      node.innerHTML=`<div class="msg-body">${renderMd?renderMd(text):esc(text)}</div>`;
+      const proseHtml=renderMd?renderMd(text):esc(text);
+      // Settled scene prose may carry message-level media snapshots (resolved
+      // by _renderAnchorSceneRowsIntoWorklog from the owner message) — stamp
+      // &snap= so historical worklog previews freeze like the main transcript.
+      const snaps=(opts&&opts.mediaSnapshots&&typeof opts.mediaSnapshots==='object')?opts.mediaSnapshots:null;
+      node.innerHTML=`<div class="msg-body">${snaps?_stampMediaSnapshots(proseHtml,snaps):proseHtml}</div>`;
     }
   }else if(row.role==='thinking'){
     if(window._showThinking===false) return null;
@@ -12919,8 +12958,13 @@ function _renderAnchorSceneRowsIntoWorklog(group, rows, opts){
   list.innerHTML='';
   let wrote=false;
   let currentTools=null;
+  // Resolve the owner message's media snapshot map, if any, from the group's
+  // disclosure key (anchor-scene:<rawIdx>) so settled scene prose rows also
+  // stamp &snap= on /api/media previews (parity with the main transcript).
+  const ownerSnaps=_anchorSceneOwnerMediaSnapshots(group);
+  const rowOpts=ownerSnaps?Object.assign({},opts,{mediaSnapshots:ownerSnaps}):opts;
   for(const row of rows){
-    const node=_anchorSceneNodeForRow(row,opts);
+    const node=_anchorSceneNodeForRow(row,rowOpts);
     if(!node) continue;
     if(row.role==='tool'){
       if(!currentTools){
@@ -12940,6 +12984,14 @@ function _renderAnchorSceneRowsIntoWorklog(group, rows, opts){
     _syncToolCallGroupSummary(group);
   }
   return wrote;
+}
+function _anchorSceneOwnerMediaSnapshots(group){
+  if(!group||!group.getAttribute) return null;
+  const key=group.getAttribute('data-activity-disclosure-key');
+  const m=key&&/^anchor-scene:(\d+)$/.exec(key);
+  if(!m) return null;
+  const msg=S.messages&&S.messages[Number(m[1])];
+  return (msg&&msg._media_snapshots&&typeof msg._media_snapshots==='object')?msg._media_snapshots:null;
 }
 function _liveProcessedWorklogAnchorScore(group, index){
   if(!group) return -1;
@@ -16564,6 +16616,13 @@ function renderMessages(options){
       }).join('')}</div>`;
     }
     let bodyHtml = _getCachedRender(displayContent, isUser);
+    // Message-level media snapshots: settled assistant messages carry a
+    // path→digest map (written at settle time) freezing the file bytes the
+    // turn emitted. Stamp it AFTER the text-keyed render cache so identical
+    // text with different snapshots (old/new comparison) never collides.
+    if(!isUser && m && m._media_snapshots && typeof m._media_snapshots==='object'){
+      bodyHtml = _stampMediaSnapshots(bodyHtml, m._media_snapshots);
+    }
     if(!isUser&&m.provider_details){
       const summary=m.provider_details_label||'Provider details';
       bodyHtml += `<details class="provider-error-details"><summary>${esc(String(summary))}</summary><pre><code>${esc(String(m.provider_details))}</code></pre></details>`;
@@ -16783,7 +16842,9 @@ function renderMessages(options){
         if(_ERR_MSG_RE.test(String(partDisplayText||'').trim())) orderedSeg.dataset.error='1';
         if(!firstSeg&&thinkingText&&window._showThinking!==false&&!((isCompactWorklogMode()||isTransparentStream())&&_assistantThinkingBelongsInWorklog(m, rawIdx, toolCallAssistantIdxs))) orderedSeg.insertAdjacentHTML('beforeend', _thinkingCardHtml(thinkingText));
         const isLastTextPart=partIdx===lastTextPartIdx;
-        const partBodyHtml=_getCachedRender(partDisplayText,false);
+        const partBodyHtml=(m && m._media_snapshots && typeof m._media_snapshots==='object')
+          ? _stampMediaSnapshots(_getCachedRender(partDisplayText,false), m._media_snapshots)
+          : _getCachedRender(partDisplayText,false);
         if(isLastTextPart&&statusHtml){
           orderedSeg.insertAdjacentHTML('beforeend', statusHtml);
         }
@@ -19165,7 +19226,8 @@ function loadDiffInline(container){
   root.querySelectorAll('.diff-inline-load:not([data-loaded])').forEach(el=>{
     el.setAttribute('data-loaded','1');
     const path=el.dataset.path;
-    fetch('api/media?path='+encodeURIComponent(path))
+    const snapQuery=_mediaSnapQuery(el);
+    fetch('api/media?path='+encodeURIComponent(path)+snapQuery)
       .then(r=>{if(!r.ok) throw new Error(r.status);return r.text();})
       .then(text=>{
         if(text.length>DIFF_MAX_SIZE){
@@ -19194,8 +19256,18 @@ function _mediaSessionQuery(){
   return mediaSessionId?'&session_id='+encodeURIComponent(mediaSessionId):'';
 }
 
+// Message-level media snapshots: lazy preview loaders (pdf/html/csv/diff/
+// excalidraw) build their fetch URL from data-path at load time. The stamping
+// pass in _stampMediaSnapshots carries the content digest in data-snap;
+// append it here so the preview shows the file as the message emitted it.
+function _mediaSnapQuery(el){
+  const snap=el&&el.dataset?el.dataset.snap:'';
+  return (snap&&/^[0-9a-f]{64}$/.test(snap))?('&snap='+snap):'';
+}
+
 function _csvMediaUrl(path, opts={}){
   let url='api/media?path='+encodeURIComponent(path)+_mediaSessionQuery();
+  if(opts.snap) url+='&snap='+encodeURIComponent(opts.snap);
   if(opts.download) url+='&download=1';
   return url;
 }
@@ -19235,8 +19307,9 @@ function loadCsvInline(container){
   root.querySelectorAll('.csv-inline-load:not([data-loaded])').forEach(el=>{
     el.setAttribute('data-loaded','1');
     const path=el.dataset.path;
-    const mediaUrl=_csvMediaUrl(path);
-    const downloadUrl=_csvMediaUrl(path,{download:true});
+    const snap=_mediaSnapQuery(el).replace(/^&snap=/,'');
+    const mediaUrl=_csvMediaUrl(path,{snap:snap||undefined});
+    const downloadUrl=_csvMediaUrl(path,{download:true,snap:snap||undefined});
     fetch(mediaUrl)
       .then(r=>{if(!r.ok) throw new Error(r.status);return r.text();})
       .then(text=>{
@@ -19255,7 +19328,8 @@ function loadExcalidrawInline(container){
   root.querySelectorAll('.excalidraw-inline-load:not([data-loaded])').forEach(el=>{
     el.setAttribute('data-loaded','1');
     const path=el.dataset.path;
-    fetch('api/media?path='+encodeURIComponent(path))
+    const snapQuery=_mediaSnapQuery(el);
+    fetch('api/media?path='+encodeURIComponent(path)+snapQuery)
       .then(r=>{if(!r.ok) throw new Error(r.status);return r.text();})
       .then(text=>{
         if(text.length>EXCALIDRAW_MAX_SIZE){
@@ -19384,7 +19458,8 @@ function loadPdfInline(container){
     const path=el.dataset.path;
     const fname=path.split('/').pop()||path;
     const mediaSessionId=(typeof S!=='undefined'&&S&&S.session&&S.session.session_id)?String(S.session.session_id):'';
-    const publicMediaUrl='api/media?path='+encodeURIComponent(path);
+    const snapQuery=_mediaSnapQuery(el);
+    const publicMediaUrl='api/media?path='+encodeURIComponent(path)+snapQuery;
     const mediaUrl=publicMediaUrl+(mediaSessionId?'&session_id='+encodeURIComponent(mediaSessionId):'');
     const loadPdf=(pdfjsLib)=>{
       fetch(mediaUrl)
@@ -19479,7 +19554,8 @@ function loadHtmlInline(container){
     const path=el.dataset.path;
     const fname=path.split('/').pop()||path;
     const mediaSessionId=(typeof S!=='undefined'&&S&&S.session&&S.session.session_id)?String(S.session.session_id):'';
-    const publicMediaUrl='api/media?path='+encodeURIComponent(path);
+    const snapQuery=_mediaSnapQuery(el);
+    const publicMediaUrl='api/media?path='+encodeURIComponent(path)+snapQuery;
     const mediaUrl=publicMediaUrl+(mediaSessionId?'&session_id='+encodeURIComponent(mediaSessionId):'');
     fetch(mediaUrl, {cache:'no-store'})
       .then(r=>{if(!r.ok) throw new Error(r.status); return r.text();})
