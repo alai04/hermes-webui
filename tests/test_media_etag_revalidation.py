@@ -565,3 +565,97 @@ def test_disconnect_mid_body_stream_no_second_response(routes, tmp_path):
     )
     assert handler.headers_ended
     assert result is True
+
+
+# ── Post-commit body transmission: NON-disconnect errors must not escape ──
+
+class _PostCommitErrorHandler(_FakeHandler):
+    """Fake handler whose writer raises a NON-disconnect error (a generic
+    OSError/EIO from a truncated read, a PermissionError, ...) once the
+    response is committed. These are NOT in _CLIENT_DISCONNECT_ERRORS, so
+    they are only contained by the broad post-commit except — if it escapes,
+    Handler.do_GET appends a trailing 500 after the committed 200."""
+
+    def __init__(self, error, headers=None):
+        super().__init__(headers)
+        self.send_response_calls: list[int] = []
+        self.headers_ended = False
+        self._error = error
+
+    def send_response(self, code):
+        self.send_response_calls.append(code)
+        super().send_response(code)
+
+    def end_headers(self):
+        self.headers_ended = True
+
+    def write(self, data):
+        raise self._error
+
+
+def _serve_with_caller(routes, handler, target, mime, cache_control):
+    """Mirror server.py Handler.do_GET: any exception escaping
+    _serve_file_bytes after commit becomes a second send_response(500).
+    With the round-7 fix in place nothing escapes, so the recorded status
+    sequence stays exactly [200]."""
+    try:
+        return routes._serve_file_bytes(
+            handler, target, mime, "inline", cache_control
+        )
+    except Exception:
+        handler.send_response(500)
+        return False
+
+
+@pytest.mark.parametrize(
+    "error",
+    [
+        pytest.param(OSError(5, "Input/output error"), id="generic-OSError-EIO"),
+        pytest.param(PermissionError(13, "Permission denied"), id="PermissionError"),
+    ],
+)
+def test_non_disconnect_error_mid_body_snapshot_no_second_response(routes, tmp_path, error):
+    """A non-disconnect error while the snapshot body is written must not
+    escape to the caller's 500 path: exactly [200], never [200, 500]."""
+    target = tmp_path / "img.png"
+    target.write_bytes(b"payload")
+    handler = _PostCommitErrorHandler(error)
+    result = _serve_with_caller(
+        routes, handler, target, "image/png", "private, no-cache"
+    )
+
+    assert handler.status == 200
+    assert handler.send_response_calls == [200], (
+        f"exactly one status expected, got {handler.send_response_calls}"
+    )
+    assert handler.headers_ended
+    assert result is True
+
+
+@pytest.mark.parametrize(
+    "error",
+    [
+        pytest.param(OSError(5, "Input/output error"), id="generic-OSError-EIO"),
+        pytest.param(PermissionError(13, "Permission denied"), id="PermissionError"),
+    ],
+)
+def test_non_disconnect_error_mid_body_stream_no_second_response(routes, tmp_path, error):
+    """Same contract for the over-cap streaming path: a non-disconnect error
+    mid-stream must not produce a trailing 500."""
+    target = tmp_path / "big.bin"
+    target.write_bytes(b"X" * (10 * 1024 * 1024 + 1))  # _ETAG_SIZE_CAP + 1
+    handler = _PostCommitErrorHandler(error)
+    result = _serve_with_caller(
+        routes,
+        handler,
+        target,
+        "application/octet-stream",
+        "private, no-cache",
+    )
+
+    assert handler.status == 200
+    assert handler.send_response_calls == [200], (
+        f"exactly one status expected, got {handler.send_response_calls}"
+    )
+    assert handler.headers_ended
+    assert result is True

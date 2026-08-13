@@ -18638,6 +18638,20 @@ def _serve_file_bytes(handler, target: Path, mime: str, disposition: str, cache_
                     type(exc).__name__,
                     getattr(handler, "path", "?"),
                 )
+            except Exception as exc:
+                # Post-commit fail-closed: the status line is already on the
+                # wire, so ANY body-transmission error that is not a client
+                # disconnect (EIO from a truncated read, a generic OSError,
+                # PermissionError, ...) must still be contained here. Letting
+                # it escape would reach Handler.do_GET's 500 path and emit a
+                # SECOND status line after the committed 200/206, corrupting
+                # the HTTP stream. Log at debug and stop — the client already
+                # received its headers (and possibly a partial body).
+                logging.getLogger("hermes.webui").debug(
+                    "Body transmission error after commit (%s): %s",
+                    type(exc).__name__,
+                    getattr(handler, "path", "?"),
+                )
         return True
     finally:
         _close_fd_quietly(fd)
