@@ -93,3 +93,43 @@ def test_sync_session_title_unique_titles_unchanged(tmp_path, monkeypatch):
         assert db.get_session_title("sess-b") == "Beta Title"
     finally:
         db.close()
+
+
+@pytest.mark.requires_agent_modules
+def test_sync_session_title_dedup_retry_never_clobbers_manual_rename(tmp_path, monkeypatch):
+    """The de-dup retry still respects title provenance: if the second session
+    was manually renamed (``user`` source) before the colliding auto-title sync
+    runs, the retry with the ``#2`` variant must NOT overwrite the user's name.
+
+    Codex #6966 SHOULD-FIX: covers the manual-rename-during-retry interleaving
+    (the existing tests cover manual-rename-before-sync only indirectly)."""
+    from api import state_sync
+
+    db = _make_db(tmp_path)
+    try:
+        monkeypatch.setattr(
+            state_sync,
+            "_get_state_db",
+            lambda profile=None: _make_db(tmp_path),
+        )
+
+        # sess-1 takes "Same Title" via the normal auto-title sync.
+        state_sync.sync_session_title("sess-1", "Same Title", profile="default")
+
+        # sess-2 is manually renamed by the user (higher-ranked `user` source)
+        # BEFORE the colliding auto-title sync fires for it.
+        db.ensure_session(session_id="sess-2", source="webui")
+        db.set_session_title("sess-2", "My Own Name")
+
+        # Now the colliding auto-title sync runs for sess-2. It collides on
+        # "Same Title", derives "Same Title #2", and retries -- but the retry
+        # goes through the same provenance rank guard, so the user's manual
+        # name must survive.
+        state_sync.sync_session_title("sess-2", "Same Title", profile="default")
+
+        assert db.get_session_title("sess-1") == "Same Title"
+        # The manual (user-source) rename is preserved -- never clobbered by
+        # either the initial auto-title or the de-dup retry variant.
+        assert db.get_session_title("sess-2") == "My Own Name"
+    finally:
+        db.close()
