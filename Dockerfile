@@ -36,7 +36,7 @@ RUN apt-get update -y --fix-missing --no-install-recommends \
 # https://sqlite.org/wal.html#walresetbug
 #
 # Debian has not backported the fix, so we compile from the amalgamation.
-# Installs to /usr/local/lib (takes ldconfig priority over /usr/lib).
+# Installs to /usr/local/lib (registered in ld.so.conf.d for arm64 priority).
 # Build tools are purged after compilation to keep the image lean.
 # Build args are for forward version bumps only (3.54+, etc.).
 # When bumping SQLITE_VERSION, recompute the SHA-256 from the official
@@ -56,6 +56,7 @@ RUN apt-get update \
        --enable-fts5 --enable-fts4 --enable-rtree \
     && make -j"$(nproc)" \
     && make install \
+    && echo "/usr/local/lib" > /etc/ld.so.conf.d/000-usr-local-lib.conf \
     && /sbin/ldconfig \
     && cd / && rm -rf /tmp/sqlite* \
     && apt-get purge -y gcc make libc6-dev \
