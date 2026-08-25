@@ -317,6 +317,11 @@ def _bounded_tail_snapshot_if_safe(session, read_floor):
     for key in snap["tail_keys"]:
         if key in prefix_key_set:
             return None
+    # In-tail duplicates (#6826 r5): a repeated message wholly inside the
+    # bounded tail makes the reconciler's context dedup diverge from the full
+    # read (display may still match) → refuse the bounded path.
+    if len(snap["tail_keys"]) != len(set(snap["tail_keys"])):
+        return None
     return snap["tail"]
 
 

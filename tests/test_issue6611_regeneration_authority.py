@@ -837,7 +837,16 @@ class _FakeConn:
     def __init__(self, real):
         self._real = real
         self._dv_calls = 0
-        self.row_factory = None
+
+    @property
+    def row_factory(self):
+        return self._real.row_factory
+
+    @row_factory.setter
+    def row_factory(self, value):
+        # the real cursor must see the row_factory, or the interleaving path
+        # dies on tuple indexing instead of exercising data_version
+        self._real.row_factory = value
 
     def cursor(self):
         return _FakeCursor(self)
@@ -869,3 +878,52 @@ def test_snapshot_refuses_when_wal_data_version_changes(monkeypatch, tmp_path):
     monkeypatch.setattr(models, "open_state_db_readonly", lambda _p: fake)
     snap = models.get_state_db_regeneration_tail_snapshot("s1", 50.0)
     assert snap is None, "changed data_version must refuse the bounded snapshot"
+
+
+def test_in_tail_duplicate_guard_refuses_bounded_and_full_revision_accepted(monkeypatch, tmp_path):
+    """#6826 r5: a repeated message wholly INSIDE the bounded tail must refuse
+    the fast path (full-read fallback), so the minted full-read revision is
+    accepted by plan_regeneration (no 409 stale_regeneration_revision)."""
+    from api import models
+    from api.session_ops import (
+        plan_regeneration,
+        regeneration_revision_for,
+        regeneration_state,
+    )
+    from api.streaming import _session_payload_with_full_messages
+
+    # 212 rows (above the 200-row anchor budget); the user row at index 210
+    # repeats the visible key of the user row at index 100 — a duplicate that
+    # lives entirely within the tail. The final assistant row (211) answers
+    # the current turn so the session is regenerable.
+    rows = []
+    for i in range(212):
+        if i == 211:
+            rows.append({"role": "assistant", "content": "final answer", "timestamp": 100.0 + i})
+            continue
+        role = "user" if i % 2 == 0 else "assistant"
+        content = "m100" if i == 210 else f"m{i}"
+        rows.append({"role": role, "content": content, "timestamp": 100.0 + i})
+    db = _make_state_db(tmp_path, rows)
+    monkeypatch.setattr(models, "_active_state_db_path", lambda: db)
+
+    session = Session(
+        session_id="s1",
+        messages=[dict(r) for r in rows],
+        context_messages=[dict(r) for r in rows],
+    )
+    # guard must refuse the bounded path (in-tail duplicate)
+    floor = min(m["timestamp"] for m in session.messages[-200:])
+    snap = models.get_state_db_regeneration_tail_snapshot("s1", floor)
+    assert snap is not None
+    assert len(snap["tail_keys"]) > len(set(snap["tail_keys"])), "fixture must repeat a key inside the tail"
+    from api import session_ops
+    assert session_ops._bounded_tail_snapshot_if_safe(session, floor) is None, \
+        "in-tail duplicate must refuse the bounded path"
+
+    # mint → validate: the full-read revision must be accepted
+    full_rows, full_context = regeneration_state(session)
+    full_rev = regeneration_revision_for(full_rows, session=session, context=full_context)
+    assert full_rev
+    plan = plan_regeneration(session, expected_revision=full_rev, lock_held=True)
+    assert plan is not None and plan.revision == full_rev
