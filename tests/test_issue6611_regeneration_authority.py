@@ -412,25 +412,117 @@ def test_terminal_payload_embeds_the_rows_it_hashes(monkeypatch):
 
 
 def test_recovered_display_context_pair_survives_local_and_gateway_apply(monkeypatch):
-    session = _session()
+    """#6611: the recovered display/context pair survives apply on BOTH paths.
+
+    The state.db authority path (empty sidecar, recovery) and the #6826
+    sidecar-anchored path (pair already loaded in memory) must both plan the
+    same canonical pair, and the recovered pair must survive local and
+    gateway apply on each path.
+    """
+    from api import models as models_api
+
     canonical_rows = [
-        {"role": "user", "content": "recovered", "id": "u-recovered", "_source": "webui"},
-        {"role": "assistant", "content": "failed"},
+        {"role": "user", "content": "recovered", "id": "u-recovered", "_source": "webui", "timestamp": 100.0},
+        {"role": "assistant", "content": "failed", "timestamp": 101.0},
     ]
     canonical_context = [
-        {"role": "system", "content": "recovered context only"},
+        {"role": "system", "content": "recovered context only", "timestamp": 99.0},
         *canonical_rows,
     ]
     monkeypatch.setattr(
-        "api.session_ops.regeneration_state",
-        lambda _session: (canonical_rows, canonical_context),
+        models_api,
+        "get_state_db_session_messages",
+        lambda *_args, **_kwargs: [dict(row) for row in canonical_rows],
     )
     from api.session_ops import apply_regeneration_plan, plan_regeneration
 
+    # --- state.db authority path: empty sidecar (recovery), the authority
+    # reconciles the state.db snapshot into the canonical pair.
+    session = _session()
+    session.messages = []
+    session.context_messages = []
     plan = plan_regeneration(session)
-    assert apply_regeneration_plan(session, plan)
-    assert session.messages == canonical_rows[:1]
-    assert any(row.get("content") == "recovered" for row in session.context_messages)
+    assert plan.canonical_rows == canonical_rows
+    assert plan.canonical_context == canonical_rows
     payload = _session_payload_with_full_messages(session)
     assert payload["messages"] == canonical_rows
     assert payload["message_count"] == len(canonical_rows)
+    assert apply_regeneration_plan(session, plan)
+    assert session.messages == canonical_rows[:1]
+    assert any(row.get("content") == "recovered" for row in session.context_messages)
+
+    # --- sidecar-anchored path: the recovered pair is already loaded in
+    # memory; the bounded state.db tail read must not lose it, and the same
+    # canonical pair must survive local + gateway apply.
+    session = _session()
+    session.messages = [dict(row) for row in canonical_rows]
+    session.context_messages = [dict(row) for row in canonical_context]
+    plan = plan_regeneration(session)
+    assert plan.canonical_rows == canonical_rows
+    assert plan.canonical_context == canonical_context
+    payload = _session_payload_with_full_messages(session)
+    assert payload["messages"] == canonical_rows
+    assert payload["message_count"] == len(canonical_rows)
+    assert apply_regeneration_plan(session, plan)
+    assert session.messages == canonical_rows[:1]
+    assert any(row.get("content") == "recovered" for row in session.context_messages)
+
+
+def test_regeneration_sidecar_path_avoids_full_transcript_refetch(monkeypatch):
+    """#6826: regenerate reads a bounded state.db tail, not the full transcript.
+
+    The full authority read materializes the entire state.db transcript (the
+    >1min stall on large sessions).  The sidecar-anchored regeneration path
+    must pass ``since_timestamp`` so the SQL scan is bounded, while still
+    reconciling through ``reconciled_state_db_messages_for_session`` — a
+    state.db-only gateway tail row must be picked up identically on both
+    paths (authority preserved).
+    """
+    from api import models as models_api
+    from api.session_ops import regeneration_state
+
+    session = _session()
+    session.messages = [
+        {"role": "user", "content": f"m{index}", "timestamp": float(index)}
+        for index in range(500)
+    ]
+    session.context_messages = [dict(row) for row in session.messages]
+    # state.db has the same transcript plus a gateway-applied tail the sidecar
+    # has not seen yet.
+    state_rows = [dict(row) for row in session.messages]
+    state_rows.append(
+        {"role": "assistant", "content": "gateway applied turn", "timestamp": 500.0}
+    )
+
+    calls = []
+
+    def fake_get_state_db_session_messages(*_args, **_kwargs):
+        calls.append(dict(_kwargs))
+        since = _kwargs.get("since_timestamp")
+        if since is None:
+            return [dict(row) for row in state_rows]
+        return [
+            dict(row)
+            for row in state_rows
+            if (row.get("timestamp") or 0) >= since
+        ]
+
+    monkeypatch.setattr(
+        models_api,
+        "get_state_db_session_messages",
+        fake_get_state_db_session_messages,
+    )
+
+    full_rows, full_context = regeneration_state(session)
+    assert calls[-1].get("since_timestamp") is None  # full read
+
+    fast_rows, fast_context = regeneration_state(session, use_sidecar=True)
+    # provably effective: the fast path requests only the bounded tip window
+    assert calls[-1].get("since_timestamp") is not None
+    assert calls[-1]["since_timestamp"] > 0
+
+    # authority preserved: identical reconciled transcript on both paths,
+    # including the state.db-only gateway tail row.
+    assert fast_rows == full_rows
+    assert fast_context == full_context
+    assert fast_rows[-1]["content"] == "gateway applied turn"

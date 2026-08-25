@@ -217,21 +217,67 @@ def regeneration_context(session):
     return regeneration_state(session)[1]
 
 
+_REGENERATION_SIDECAR_ANCHOR_BUDGET = 200
+
+
+def _sidecar_regeneration_read_floor(session):
+    """Return a state.db tail-read floor anchored by the already-loaded sidecar.
+
+    #6826: regenerating a large session must not re-materialize the full
+    state.db transcript (a >1min stall on big sessions).  When the in-memory
+    sidecar is a usable reconciliation base — append-only session with no
+    active truncation markers and timestamped rows — return the timestamp
+    floor for a bounded ``since_timestamp`` tail read.  Rows at/after the
+    floor (including any gateway/server-applied tail the sidecar has not seen
+    yet) are re-read and merged, and rows the sidecar already carries are
+    deduplicated by the append-only merge, so the #6611 reconciliation
+    authority is preserved on the fast path.
+
+    Returns ``None`` when the sidecar cannot anchor a tail read; callers then
+    fall back to the full state.db read (unchanged behavior).
+    """
+    if getattr(session, "truncation_watermark", None) not in (None, ""):
+        return None
+    if getattr(session, "truncation_boundary", None) not in (None, ""):
+        return None
+    messages = getattr(session, "messages", None)
+    if not isinstance(messages, list) or not messages:
+        return None
+    from api.models import _message_timestamp_as_float
+
+    timestamps = [_message_timestamp_as_float(message) for message in messages]
+    if any(timestamp is None for timestamp in timestamps):
+        return None
+    # Conservative anchor: re-read a bounded tip window so sub-second/clock
+    # drift near the sidecar tip cannot hide a concurrently appended state.db
+    # row, while the raw read stays tiny for huge sessions.
+    return min(timestamps[-_REGENERATION_SIDECAR_ANCHOR_BUDGET:])
+
+
 def regeneration_state(session, *, use_sidecar=False):
-    """Read one immutable state.db snapshot and reconcile both transcript views."""
-    if use_sidecar:
-        # Use the WebUI sidecar messages to avoid hitting state.db (e.g., for regeneration)
-        messages = getattr(session, "messages", [])
-        context = getattr(session, "context_messages", [])
-        return messages, context
+    """Read one immutable state.db snapshot and reconcile both transcript views.
+
+    ``use_sidecar=True`` (#6826) anchors the state.db read to the already
+    loaded in-memory sidecar: only a bounded tail (``since_timestamp`` floor)
+    is re-read instead of the full transcript, and both views still route
+    through :func:`reconciled_state_db_messages_for_session`, so the #6611
+    reconciliation authority (recovered display/context pair survives local
+    and gateway apply) is preserved on the fast path.
+    """
     from api.models import (
         get_state_db_session_messages,
         reconciled_state_db_messages_for_session,
     )
 
+    state_reader_kwargs = {}
+    if use_sidecar:
+        read_floor = _sidecar_regeneration_read_floor(session)
+        if read_floor is not None:
+            state_reader_kwargs["since_timestamp"] = read_floor
     state_messages = get_state_db_session_messages(
         getattr(session, "session_id", None),
         profile=getattr(session, "profile", None),
+        **state_reader_kwargs,
     )
     return (
         reconciled_state_db_messages_for_session(
