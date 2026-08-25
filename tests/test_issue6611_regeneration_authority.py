@@ -513,6 +513,24 @@ def test_regeneration_sidecar_path_avoids_full_transcript_refetch(monkeypatch):
         fake_get_state_db_session_messages,
     )
 
+    # The bounded guard must prove the skipped prefix (rows < floor) is
+    # identical in the sidecar: the fake state.db carries the same 300 prefix
+    # rows, so simulate the prefix summary + keys from the sidecar itself.
+    from api.models import _session_message_visible_key
+
+    floor = min(row["timestamp"] for row in session.messages[-200:])
+    prefix_rows = [r for r in session.messages if (r.get("timestamp") or 0) < floor]
+    monkeypatch.setattr(
+        models_api,
+        "get_state_db_session_message_prefix_summary",
+        lambda *_a, **_k: {"count": len(prefix_rows), "null_timestamp_count": 0},
+    )
+    monkeypatch.setattr(
+        models_api,
+        "get_state_db_session_message_keys_before_timestamp",
+        lambda *_a, **_k: [_session_message_visible_key(r) for r in prefix_rows],
+    )
+
     full_rows, full_context = regeneration_state(session)
     assert calls[-1].get("since_timestamp") is None  # full read
 
@@ -526,3 +544,119 @@ def test_regeneration_sidecar_path_avoids_full_transcript_refetch(monkeypatch):
     assert fast_rows == full_rows
     assert fast_context == full_context
     assert fast_rows[-1]["content"] == "gateway applied turn"
+
+
+# ── #6826 r3: bounded tail-read guard ────────────────────────────────────────
+
+def _sidecar_session(rows=3, *, anchor_key=None, anchor_ts=None):
+    """Session whose sidecar carries `rows` timestamped display messages."""
+    messages = [
+        {"role": "user" if i % 2 == 0 else "assistant", "content": f"m{i}", "timestamp": 100.0 + i * 100.0}
+        for i in range(rows)
+    ]
+    s = Session(
+        session_id="sidecar-guard-6826",
+        messages=messages,
+        context_messages=[dict(m) for m in messages],
+    )
+    if anchor_key:
+        s.compression_anchor_message_key = anchor_key
+        if anchor_ts is not None:
+            s._anchor_ts = anchor_ts
+    return s
+
+
+def test_bounded_guard_empty_prefix_allows_tail_read(monkeypatch):
+    from api import session_ops
+
+    session = _sidecar_session(3)
+    monkeypatch.setattr(
+        "api.models.get_state_db_session_message_prefix_summary",
+        lambda *_a, **_k: {"count": 0, "null_timestamp_count": 0},
+    )
+    seen = {}
+    monkeypatch.setattr(
+        "api.models.get_state_db_session_message_keys_before_timestamp",
+        lambda *_a, **_k: [],
+    )
+    monkeypatch.setattr(
+        "api.models.get_state_db_session_messages",
+        lambda *_a, **_k: _capture(seen, _k),
+    )
+    session_ops.regeneration_state(session, use_sidecar=True)
+    assert seen.get("since_timestamp") is not None, "empty skipped prefix must take the bounded tail read"
+
+
+def test_bounded_guard_unrepresented_prefix_row_falls_back(monkeypatch):
+    from api import session_ops
+
+    session = _sidecar_session(3)
+    # state.db has one row older than the floor that the sidecar does NOT carry
+    monkeypatch.setattr(
+        "api.models.get_state_db_session_message_prefix_summary",
+        lambda *_a, **_k: {"count": 1, "null_timestamp_count": 0},
+    )
+    monkeypatch.setattr(
+        "api.models.get_state_db_session_message_keys_before_timestamp",
+        lambda *_a, **_k: [("user", "recoverable-only-in-db")],
+    )
+    seen = {}
+    monkeypatch.setattr(
+        "api.models.get_state_db_session_messages",
+        lambda *_a, **_k: _capture(seen, _k),
+    )
+    session_ops.regeneration_state(session, use_sidecar=True)
+    assert "since_timestamp" not in seen, "unrepresented prefix row must force the full read (no since_timestamp)"
+
+
+def test_bounded_guard_compression_anchor_below_floor_falls_back(monkeypatch):
+    from api import session_ops
+
+    session = _sidecar_session(3)
+    # anchor timestamp predates the floor → bounded read cannot cover it
+    session.compression_anchor_message_key = {"role": "user", "text": "m0", "ts": 100.0}
+    monkeypatch.setattr(
+        "api.models.get_state_db_session_message_prefix_summary",
+        lambda *_a, **_k: {"count": 0, "null_timestamp_count": 0},
+    )
+    monkeypatch.setattr(
+        "api.models.get_state_db_session_message_keys_before_timestamp",
+        lambda *_a, **_k: [],
+    )
+    # shrink the anchor budget window so the floor (300.0) sits above the anchor
+    monkeypatch.setattr(session_ops, "_REGENERATION_SIDECAR_ANCHOR_BUDGET", 1)
+    seen = {}
+    monkeypatch.setattr(
+        "api.models.get_state_db_session_messages",
+        lambda *_a, **_k: _capture(seen, _k),
+    )
+    session_ops.regeneration_state(session, use_sidecar=True)
+    assert "since_timestamp" not in seen, "compression anchor below floor must force the full read"
+
+
+def test_bounded_guard_compression_anchor_covered_allows(monkeypatch):
+    from api import session_ops
+
+    session = _sidecar_session(3)
+    session.compression_anchor_message_key = {"role": "user", "text": "m0", "ts": 100.0}
+    # budget 200 covers all 3 rows → floor = min(all) = 100 → anchor at floor is covered
+    monkeypatch.setattr(
+        "api.models.get_state_db_session_message_prefix_summary",
+        lambda *_a, **_k: {"count": 0, "null_timestamp_count": 0},
+    )
+    monkeypatch.setattr(
+        "api.models.get_state_db_session_message_keys_before_timestamp",
+        lambda *_a, **_k: [],
+    )
+    seen = {}
+    monkeypatch.setattr(
+        "api.models.get_state_db_session_messages",
+        lambda *_a, **_k: _capture(seen, _k),
+    )
+    session_ops.regeneration_state(session, use_sidecar=True)
+    assert seen.get("since_timestamp") is not None, "anchor covered by floor must keep the bounded tail read"
+
+
+def _capture(seen, kwargs):
+    seen.update(kwargs)
+    return []

@@ -254,6 +254,70 @@ def _sidecar_regeneration_read_floor(session):
     return min(timestamps[-_REGENERATION_SIDECAR_ANCHOR_BUDGET:])
 
 
+def _bounded_tail_read_is_safe(session, read_floor) -> bool:
+    """Prove the skipped state.db prefix is represented identically in the
+    sidecar; otherwise the caller MUST fall back to the full read (#6826 r3).
+
+    The bounded ``since_timestamp`` read silently omits every state.db row
+    older than the floor. That is only safe when the skipped prefix is
+    provably identical in the already-loaded sidecar — same count AND same
+    ordered visible identity — and when a compression anchor (if any) is
+    covered by the floor. Any mismatch, missing database, or uncertainty
+    returns False (full-read fallback), so the #6611 regeneration authority
+    never operates on an unreconciled view.
+    """
+    sid = getattr(session, "session_id", None)
+    if not sid:
+        return False
+    profile = getattr(session, "profile", None)
+    from api.models import (
+        _session_message_visible_key,
+        get_state_db_session_message_keys_before_timestamp,
+        get_state_db_session_message_prefix_summary,
+    )
+
+    prefix = get_state_db_session_message_prefix_summary(sid, read_floor, profile=profile)
+    if prefix is None:
+        return False  # cannot prove the prefix → full read
+    # Compression-anchor coverage: auto-compressed sessions keep context rows
+    # around the anchor; if the anchor predates the floor the bounded read can
+    # drop compacted-tail context rows (display may still match). The anchor
+    # is a dict {"role","text","ts","attachments"} — compare its timestamp.
+    anchor = getattr(session, "compression_anchor_message_key", None)
+    if isinstance(anchor, dict):
+        try:
+            anchor_ts = float(anchor.get("ts"))
+        except (TypeError, ValueError):
+            anchor_ts = None
+        if anchor_ts is None or anchor_ts < read_floor:
+            return False
+    if prefix.get("count") == 0 and prefix.get("null_timestamp_count") == 0:
+        # Empty skipped prefix: the bounded read already covers every row.
+        return True
+    # Non-empty skipped prefix: prove identical ordered visible identity.
+    db_keys = get_state_db_session_message_keys_before_timestamp(
+        sid, read_floor, profile=profile
+    )
+    if db_keys is None:
+        return False
+    sidecar_keys = []
+    for message in getattr(session, "messages", None) or []:
+        if not isinstance(message, dict):
+            continue
+        try:
+            ts = float(message.get("timestamp"))
+        except (TypeError, ValueError):
+            ts = None
+        if ts is not None and ts < read_floor:
+            key = _session_message_visible_key(message)
+            if key is None:
+                return False
+            sidecar_keys.append(key)
+    if list(db_keys) != sidecar_keys:
+        return False  # mismatch → full read
+    return True
+
+
 def regeneration_state(session, *, use_sidecar=False):
     """Read one immutable state.db snapshot and reconcile both transcript views.
 
@@ -263,6 +327,11 @@ def regeneration_state(session, *, use_sidecar=False):
     through :func:`reconciled_state_db_messages_for_session`, so the #6611
     reconciliation authority (recovered display/context pair survives local
     and gateway apply) is preserved on the fast path.
+
+    The bounded tail is only trusted when
+    :func:`_bounded_tail_read_is_safe` proves the skipped state.db prefix is
+    identical in the sidecar (count + ordered visible identity + compression
+    anchor coverage); otherwise the read falls back to the full transcript.
     """
     from api.models import (
         get_state_db_session_messages,
@@ -272,7 +341,7 @@ def regeneration_state(session, *, use_sidecar=False):
     state_reader_kwargs = {}
     if use_sidecar:
         read_floor = _sidecar_regeneration_read_floor(session)
-        if read_floor is not None:
+        if read_floor is not None and _bounded_tail_read_is_safe(session, read_floor):
             state_reader_kwargs["since_timestamp"] = read_floor
     state_messages = get_state_db_session_messages(
         getattr(session, "session_id", None),
