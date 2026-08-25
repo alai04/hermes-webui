@@ -254,35 +254,34 @@ def _sidecar_regeneration_read_floor(session):
     return min(timestamps[-_REGENERATION_SIDECAR_ANCHOR_BUDGET:])
 
 
-def _bounded_tail_read_is_safe(session, read_floor) -> bool:
-    """Prove the skipped state.db prefix is represented identically in the
-    sidecar; otherwise the caller MUST fall back to the full read (#6826 r3).
+def _bounded_tail_snapshot_if_safe(session, read_floor):
+    """Return the bounded tail rows ONLY when it is provably identical to the
+    full read; otherwise None (caller must fall back to the full read).
 
-    The bounded ``since_timestamp`` read silently omits every state.db row
-    older than the floor. That is only safe when the skipped prefix is
-    provably identical in the already-loaded sidecar — same count AND same
-    ordered visible identity — and when a compression anchor (if any) is
-    covered by the floor. Any mismatch, missing database, or uncertainty
-    returns False (full-read fallback), so the #6611 regeneration authority
-    never operates on an unreconciled view.
+    #6826 r3: the skipped state.db prefix (rows older than the floor) must be
+    represented identically in the sidecar — same count AND same ordered
+    visible identity — and the bounded tail must not repeat any skipped key
+    (occurrence-count collision: a new tail turn repeating an older prompt
+    would be mistaken for the old sidecar duplicate and dropped). The prefix
+    proof and the tail data come from ONE read transaction (no TOCTOU).
+
+    Any mismatch, missing database, or uncertainty returns None, so the #6611
+    regeneration authority never operates on an unreconciled view.
     """
     sid = getattr(session, "session_id", None)
     if not sid:
-        return False
+        return None
     profile = getattr(session, "profile", None)
     from api.models import (
         _session_message_visible_key,
-        get_state_db_session_message_keys_before_timestamp,
-        get_state_db_session_message_prefix_summary,
+        get_state_db_regeneration_tail_snapshot,
     )
 
-    prefix = get_state_db_session_message_prefix_summary(sid, read_floor, profile=profile)
-    if prefix is None:
-        return False  # cannot prove the prefix → full read
-    # Compression-anchor coverage: auto-compressed sessions keep context rows
-    # around the anchor; if the anchor predates the floor the bounded read can
-    # drop compacted-tail context rows (display may still match). The anchor
-    # is a dict {"role","text","ts","attachments"} — compare its timestamp.
+    snap = get_state_db_regeneration_tail_snapshot(sid, read_floor, profile=profile)
+    if snap is None:
+        return None  # cannot obtain a stable single-snapshot → full read
+    # Compression-anchor coverage: if the anchor predates the floor the bounded
+    # read can drop compacted-tail context rows (display may still match).
     anchor = getattr(session, "compression_anchor_message_key", None)
     if isinstance(anchor, dict):
         try:
@@ -290,16 +289,12 @@ def _bounded_tail_read_is_safe(session, read_floor) -> bool:
         except (TypeError, ValueError):
             anchor_ts = None
         if anchor_ts is None or anchor_ts < read_floor:
-            return False
+            return None
+    prefix = snap["prefix"]
     if prefix.get("count") == 0 and prefix.get("null_timestamp_count") == 0:
         # Empty skipped prefix: the bounded read already covers every row.
-        return True
+        return snap["tail"]
     # Non-empty skipped prefix: prove identical ordered visible identity.
-    db_keys = get_state_db_session_message_keys_before_timestamp(
-        sid, read_floor, profile=profile
-    )
-    if db_keys is None:
-        return False
     sidecar_keys = []
     for message in getattr(session, "messages", None) or []:
         if not isinstance(message, dict):
@@ -311,11 +306,18 @@ def _bounded_tail_read_is_safe(session, read_floor) -> bool:
         if ts is not None and ts < read_floor:
             key = _session_message_visible_key(message)
             if key is None:
-                return False
+                return None
             sidecar_keys.append(key)
-    if list(db_keys) != sidecar_keys:
-        return False  # mismatch → full read
-    return True
+    if list(snap["prefix_keys"]) != sidecar_keys:
+        return None  # mismatch → full read
+    # Occurrence-count collision (#6826 r3 #1): if any bounded-tail key ALSO
+    # occurs in the skipped prefix, the reconciler may drop the repeated tail
+    # row — fall back conservatively.
+    prefix_key_set = set(snap["prefix_keys"])
+    for key in snap["tail_keys"]:
+        if key in prefix_key_set:
+            return None
+    return snap["tail"]
 
 
 def regeneration_state(session, *, use_sidecar=False):
@@ -329,25 +331,29 @@ def regeneration_state(session, *, use_sidecar=False):
     and gateway apply) is preserved on the fast path.
 
     The bounded tail is only trusted when
-    :func:`_bounded_tail_read_is_safe` proves the skipped state.db prefix is
-    identical in the sidecar (count + ordered visible identity + compression
-    anchor coverage); otherwise the read falls back to the full transcript.
+    :func:`_bounded_tail_snapshot_if_safe` proves the skipped state.db prefix
+    is identical in the sidecar (count + ordered visible identity + no
+    occurrence collision + compression anchor coverage), and the tail rows
+    come from the SAME single read transaction as the proof (no TOCTOU);
+    otherwise the read falls back to the full transcript.
     """
     from api.models import (
         get_state_db_session_messages,
         reconciled_state_db_messages_for_session,
     )
 
-    state_reader_kwargs = {}
+    bounded_tail = None
     if use_sidecar:
         read_floor = _sidecar_regeneration_read_floor(session)
-        if read_floor is not None and _bounded_tail_read_is_safe(session, read_floor):
-            state_reader_kwargs["since_timestamp"] = read_floor
-    state_messages = get_state_db_session_messages(
-        getattr(session, "session_id", None),
-        profile=getattr(session, "profile", None),
-        **state_reader_kwargs,
-    )
+        if read_floor is not None:
+            bounded_tail = _bounded_tail_snapshot_if_safe(session, read_floor)
+    if bounded_tail is not None:
+        state_messages = bounded_tail
+    else:
+        state_messages = get_state_db_session_messages(
+            getattr(session, "session_id", None),
+            profile=getattr(session, "profile", None),
+        )
     return (
         reconciled_state_db_messages_for_session(
             session,

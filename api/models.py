@@ -8598,6 +8598,144 @@ def get_state_db_session_message_keys_before_timestamp(
         return None
 
 
+def get_state_db_regeneration_tail_snapshot(
+    sid,
+    floor,
+    *,
+    profile=None,
+):
+    """Return prefix proof + bounded tail from ONE read transaction (#6826 r3).
+
+    The regeneration guard must not suffer TOCTOU: the prefix summary, the
+    ordered prefix keys, and the bounded tail must come from the same SQLite
+    snapshot, otherwise a row inserted between the proof and the data read
+    can be silently omitted while the proof still authorizes the bounded path.
+
+    Returns ``None`` when a stable single-connection snapshot cannot be
+    obtained (callers must fall back to the full read). Otherwise returns::
+
+        {
+          "prefix": {"count": N, "null_timestamp_count": M},
+          "prefix_keys": [visible-key, ...],       # rows < floor, db order
+          "tail": [message-dict, ...],             # rows >= floor (bounded)
+          "tail_keys": [visible-key, ...],         # rows >= floor, db order
+        }
+    """
+    try:
+        import sqlite3
+    except ImportError:
+        return None
+
+    if not sid:
+        return None
+    try:
+        floor_ts = float(floor)
+    except (TypeError, ValueError):
+        return None
+    if isinstance(profile, str) and profile:
+        db_path = _get_profile_home(profile) / 'state.db'
+        if not db_path.exists():
+            db_path = _active_state_db_path()
+    else:
+        db_path = _active_state_db_path()
+    if not db_path.exists():
+        return {"prefix": {"count": 0, "null_timestamp_count": 0}, "prefix_keys": [], "tail": [], "tail_keys": []}
+
+    try:
+        with closing(open_state_db_readonly(db_path)) as conn:
+            conn.row_factory = sqlite3.Row
+            cur = conn.cursor()
+            cur.execute("BEGIN")
+            cur.execute("PRAGMA table_info(messages)")
+            available = {str(row['name']) for row in cur.fetchall()}
+            if not {'session_id', 'role', 'content', 'timestamp'}.issubset(available):
+                cur.execute("ROLLBACK")
+                return None
+            active_clause = ""
+            if 'active' in available:
+                active_clause = " AND (active IS NULL OR active != 0)"
+            # 1) prefix summary (rows with timestamp < floor)
+            cur.execute(
+                f"""
+                SELECT
+                    COUNT(CASE WHEN timestamp IS NOT NULL AND timestamp < ? THEN 1 END) AS count,
+                    COUNT(CASE WHEN timestamp IS NULL THEN 1 END) AS null_timestamp_count
+                FROM messages
+                WHERE session_id = ? {active_clause}
+                """,
+                (floor_ts, str(sid)),
+            )
+            row = cur.fetchone()
+            prefix = {
+                "count": int(row["count"]) if row else 0,
+                "null_timestamp_count": int(row["null_timestamp_count"]) if row else 0,
+            }
+            # 2) ordered prefix keys (rows < floor)
+            prefix_key_cols = "COALESCE(role,'') AS role, COALESCE(content,'') AS content"
+            if 'tool_calls' in available:
+                prefix_key_cols += ", tool_calls"
+            if 'api_content' in available:
+                prefix_key_cols += ", api_content"
+            if 'id' in available:
+                prefix_key_sql = (
+                    f"SELECT {prefix_key_cols} FROM messages "
+                    "WHERE session_id = ? AND timestamp IS NOT NULL AND timestamp < ? "
+                    f"{active_clause} ORDER BY timestamp ASC, id ASC"
+                )
+                prefix_params = (str(sid), floor_ts)
+            else:
+                prefix_key_sql = (
+                    f"SELECT {prefix_key_cols} FROM messages "
+                    "WHERE session_id = ? AND timestamp IS NOT NULL AND timestamp < ? "
+                    f"{active_clause} ORDER BY timestamp ASC"
+                )
+                prefix_params = (str(sid), floor_ts)
+            try:
+                cur.execute(prefix_key_sql, prefix_params)
+            except Exception:
+                cur.execute("ROLLBACK")
+                return None
+            prefix_keys = [
+                _session_message_visible_key({
+                    "role": r["role"],
+                    "content": r["content"],
+                    "tool_calls": _json_loads_if_string(r["tool_calls"]) if "tool_calls" in r.keys() else None,
+                    "api_content": r["api_content"] if "api_content" in r.keys() else None,
+                }, normalize_workspace_prefix=True)
+                for r in cur.fetchall()
+            ]
+            # 3) bounded tail (rows >= floor) with the columns the reconciler uses
+            tail_select = ['role', 'content', 'timestamp']
+            for col in ('tool_call_id', 'tool_calls', 'tool_name', 'reasoning', 'api_content', 'active', 'id'):
+                if col in available:
+                    tail_select.append(col)
+            tail_sql = (
+                f"SELECT {', '.join(tail_select)} FROM messages "
+                f"WHERE session_id = ? AND (timestamp IS NULL OR timestamp >= ?) {active_clause} "
+                "ORDER BY timestamp ASC, id ASC"
+            )
+            cur.execute(tail_sql, (str(sid), floor_ts))
+            tail_rows = [dict(r) for r in cur.fetchall()]
+            tail_keys = [
+                _session_message_visible_key({
+                    "role": r.get("role"),
+                    "content": r.get("content"),
+                    "tool_calls": _json_loads_if_string(r["tool_calls"]) if r.get("tool_calls") is not None else None,
+                    "api_content": r.get("api_content"),
+                }, normalize_workspace_prefix=True)
+                for r in tail_rows
+            ]
+            cur.execute("COMMIT")
+            return {
+                "prefix": prefix,
+                "prefix_keys": prefix_keys,
+                "tail": tail_rows,
+                "tail_keys": tail_keys,
+            }
+    except Exception:
+        return None
+
+
 def get_state_db_session_summary(sid, *, profile=None) -> dict:
     """Return a cheap message count/timestamp summary for one state.db session."""
     try:

@@ -514,30 +514,32 @@ def test_regeneration_sidecar_path_avoids_full_transcript_refetch(monkeypatch):
     )
 
     # The bounded guard must prove the skipped prefix (rows < floor) is
-    # identical in the sidecar: the fake state.db carries the same 300 prefix
-    # rows, so simulate the prefix summary + keys from the sidecar itself.
+    # identical in the sidecar and return the tail from ONE snapshot. The fake
+    # state.db carries the same 300 prefix rows as the sidecar.
     from api.models import _session_message_visible_key
 
     floor = min(row["timestamp"] for row in session.messages[-200:])
     prefix_rows = [r for r in session.messages if (r.get("timestamp") or 0) < floor]
+    tail_rows = [r for r in state_rows if (r.get("timestamp") or 0) >= floor]
     monkeypatch.setattr(
         models_api,
-        "get_state_db_session_message_prefix_summary",
-        lambda *_a, **_k: {"count": len(prefix_rows), "null_timestamp_count": 0},
-    )
-    monkeypatch.setattr(
-        models_api,
-        "get_state_db_session_message_keys_before_timestamp",
-        lambda *_a, **_k: [_session_message_visible_key(r) for r in prefix_rows],
+        "get_state_db_regeneration_tail_snapshot",
+        lambda *_a, **_k: {
+            "prefix": {"count": len(prefix_rows), "null_timestamp_count": 0},
+            "prefix_keys": [_session_message_visible_key(r) for r in prefix_rows],
+            "tail": [dict(r) for r in tail_rows],
+            "tail_keys": [_session_message_visible_key(r) for r in tail_rows],
+        },
     )
 
     full_rows, full_context = regeneration_state(session)
     assert calls[-1].get("since_timestamp") is None  # full read
 
+    # provably effective: the fast path does NOT consult the full reader — the
+    # bounded tail comes from the single snapshot
+    calls_before = len(calls)
     fast_rows, fast_context = regeneration_state(session, use_sidecar=True)
-    # provably effective: the fast path requests only the bounded tip window
-    assert calls[-1].get("since_timestamp") is not None
-    assert calls[-1]["since_timestamp"] > 0
+    assert len(calls) == calls_before, "bounded path must not touch the full reader"
 
     # authority preserved: identical reconciled transcript on both paths,
     # including the state.db-only gateway tail row.
@@ -566,25 +568,33 @@ def _sidecar_session(rows=3, *, anchor_key=None, anchor_ts=None):
     return s
 
 
+def _snap(prefix_count=0, prefix_keys=None, tail=None, tail_keys=None):
+    """Factory for a fake get_state_db_regeneration_tail_snapshot result."""
+    tail = tail if tail is not None else []
+    return {
+        "prefix": {"count": prefix_count, "null_timestamp_count": 0},
+        "prefix_keys": prefix_keys or [],
+        "tail": tail,
+        "tail_keys": tail_keys if tail_keys is not None else [],
+    }
+
+
 def test_bounded_guard_empty_prefix_allows_tail_read(monkeypatch):
     from api import session_ops
 
     session = _sidecar_session(3)
     monkeypatch.setattr(
-        "api.models.get_state_db_session_message_prefix_summary",
-        lambda *_a, **_k: {"count": 0, "null_timestamp_count": 0},
+        "api.models.get_state_db_regeneration_tail_snapshot",
+        lambda *_a, **_k: _snap(tail=[{"role": "user", "content": "t", "timestamp": 300.0}]),
     )
     seen = {}
-    monkeypatch.setattr(
-        "api.models.get_state_db_session_message_keys_before_timestamp",
-        lambda *_a, **_k: [],
-    )
     monkeypatch.setattr(
         "api.models.get_state_db_session_messages",
         lambda *_a, **_k: _capture(seen, _k),
     )
     session_ops.regeneration_state(session, use_sidecar=True)
-    assert seen.get("since_timestamp") is not None, "empty skipped prefix must take the bounded tail read"
+    # bounded path: full reader NOT consulted (tail comes from the snapshot)
+    assert seen == {}, "empty skipped prefix must take the bounded tail from the snapshot"
 
 
 def test_bounded_guard_unrepresented_prefix_row_falls_back(monkeypatch):
@@ -593,12 +603,11 @@ def test_bounded_guard_unrepresented_prefix_row_falls_back(monkeypatch):
     session = _sidecar_session(3)
     # state.db has one row older than the floor that the sidecar does NOT carry
     monkeypatch.setattr(
-        "api.models.get_state_db_session_message_prefix_summary",
-        lambda *_a, **_k: {"count": 1, "null_timestamp_count": 0},
-    )
-    monkeypatch.setattr(
-        "api.models.get_state_db_session_message_keys_before_timestamp",
-        lambda *_a, **_k: [("user", "recoverable-only-in-db")],
+        "api.models.get_state_db_regeneration_tail_snapshot",
+        lambda *_a, **_k: _snap(
+            prefix_count=1,
+            prefix_keys=[("user", "recoverable-only-in-db")],
+        ),
     )
     seen = {}
     monkeypatch.setattr(
@@ -606,7 +615,33 @@ def test_bounded_guard_unrepresented_prefix_row_falls_back(monkeypatch):
         lambda *_a, **_k: _capture(seen, _k),
     )
     session_ops.regeneration_state(session, use_sidecar=True)
-    assert "since_timestamp" not in seen, "unrepresented prefix row must force the full read (no since_timestamp)"
+    assert seen != {}, "unrepresented prefix row must force the full read (full reader consulted)"
+
+
+def test_bounded_guard_repeated_tail_key_falls_back(monkeypatch):
+    """#6826 r3 #1: a bounded-tail key that ALSO occurs in the skipped prefix
+    must force the full read (occurrence-count collision would drop the
+    repeated tail row)."""
+    from api import session_ops
+
+    session = _sidecar_session(3)
+    repeated_key = ("user", "m0")  # m0 lives below the floor AND repeats in the tail
+    monkeypatch.setattr(
+        "api.models.get_state_db_regeneration_tail_snapshot",
+        lambda *_a, **_k: _snap(
+            prefix_count=1,
+            prefix_keys=[repeated_key],
+            tail=[{"role": "user", "content": "m0", "timestamp": 300.0}],
+            tail_keys=[repeated_key],
+        ),
+    )
+    seen = {}
+    monkeypatch.setattr(
+        "api.models.get_state_db_session_messages",
+        lambda *_a, **_k: _capture(seen, _k),
+    )
+    session_ops.regeneration_state(session, use_sidecar=True)
+    assert seen != {}, "repeated tail key must force the full read"
 
 
 def test_bounded_guard_compression_anchor_below_floor_falls_back(monkeypatch):
@@ -616,12 +651,8 @@ def test_bounded_guard_compression_anchor_below_floor_falls_back(monkeypatch):
     # anchor timestamp predates the floor → bounded read cannot cover it
     session.compression_anchor_message_key = {"role": "user", "text": "m0", "ts": 100.0}
     monkeypatch.setattr(
-        "api.models.get_state_db_session_message_prefix_summary",
-        lambda *_a, **_k: {"count": 0, "null_timestamp_count": 0},
-    )
-    monkeypatch.setattr(
-        "api.models.get_state_db_session_message_keys_before_timestamp",
-        lambda *_a, **_k: [],
+        "api.models.get_state_db_regeneration_tail_snapshot",
+        lambda *_a, **_k: _snap(),
     )
     # shrink the anchor budget window so the floor (300.0) sits above the anchor
     monkeypatch.setattr(session_ops, "_REGENERATION_SIDECAR_ANCHOR_BUDGET", 1)
@@ -631,7 +662,7 @@ def test_bounded_guard_compression_anchor_below_floor_falls_back(monkeypatch):
         lambda *_a, **_k: _capture(seen, _k),
     )
     session_ops.regeneration_state(session, use_sidecar=True)
-    assert "since_timestamp" not in seen, "compression anchor below floor must force the full read"
+    assert seen != {}, "compression anchor below floor must force the full read"
 
 
 def test_bounded_guard_compression_anchor_covered_allows(monkeypatch):
@@ -641,12 +672,8 @@ def test_bounded_guard_compression_anchor_covered_allows(monkeypatch):
     session.compression_anchor_message_key = {"role": "user", "text": "m0", "ts": 100.0}
     # budget 200 covers all 3 rows → floor = min(all) = 100 → anchor at floor is covered
     monkeypatch.setattr(
-        "api.models.get_state_db_session_message_prefix_summary",
-        lambda *_a, **_k: {"count": 0, "null_timestamp_count": 0},
-    )
-    monkeypatch.setattr(
-        "api.models.get_state_db_session_message_keys_before_timestamp",
-        lambda *_a, **_k: [],
+        "api.models.get_state_db_regeneration_tail_snapshot",
+        lambda *_a, **_k: _snap(tail=[{"role": "user", "content": "t", "timestamp": 300.0}]),
     )
     seen = {}
     monkeypatch.setattr(
@@ -654,9 +681,67 @@ def test_bounded_guard_compression_anchor_covered_allows(monkeypatch):
         lambda *_a, **_k: _capture(seen, _k),
     )
     session_ops.regeneration_state(session, use_sidecar=True)
-    assert seen.get("since_timestamp") is not None, "anchor covered by floor must keep the bounded tail read"
+    assert seen == {}, "anchor covered by floor must keep the bounded tail read"
+
+
+def test_bounded_guard_missing_snapshot_falls_back(monkeypatch):
+    """#6826 r3 #2 (TOCTOU): if a stable single-connection snapshot cannot be
+    obtained, the guard must refuse the bounded path entirely."""
+    from api import session_ops
+
+    session = _sidecar_session(3)
+    monkeypatch.setattr(
+        "api.models.get_state_db_regeneration_tail_snapshot",
+        lambda *_a, **_k: None,
+    )
+    seen = {}
+    monkeypatch.setattr(
+        "api.models.get_state_db_session_messages",
+        lambda *_a, **_k: _capture(seen, _k),
+    )
+    session_ops.regeneration_state(session, use_sidecar=True)
+    assert seen != {}, "missing snapshot must force the full read (no TOCTOU window)"
 
 
 def _capture(seen, kwargs):
     seen.update(kwargs)
     return []
+
+
+def test_regeneration_tail_snapshot_reads_real_sqlite(monkeypatch, tmp_path):
+    """Real-SQLite: the single-connection snapshot returns prefix proof + tail
+    from one read, including the repeated-prompt collision shape from the
+    round-3 review (a prompt that lives both below and above the floor)."""
+    import sqlite3
+
+    from api import models
+
+    db = tmp_path / "state.db"
+    conn = sqlite3.connect(db)
+    conn.execute(
+        "CREATE TABLE messages (id INTEGER PRIMARY KEY, session_id TEXT, role TEXT, "
+        "content TEXT, timestamp REAL, tool_calls TEXT, active INTEGER)"
+    )
+    rows = [
+        ("s1", "user", "prompt", 100.0),
+        ("s1", "assistant", "a1", 200.0),
+        ("s1", "user", "prompt", 300.0),   # repeated prompt above the floor
+        ("s1", "assistant", "a2", 400.0),
+    ]
+    for sid, role, content, ts in rows:
+        conn.execute(
+            "INSERT INTO messages (session_id, role, content, timestamp, active) VALUES (?,?,?,?,1)",
+            (sid, role, content, ts),
+        )
+    conn.commit()
+    conn.close()
+
+    monkeypatch.setattr(models, "_active_state_db_path", lambda: db)
+    snap = models.get_state_db_regeneration_tail_snapshot("s1", 250.0)
+    assert snap is not None
+    assert snap["prefix"]["count"] == 2, "rows < floor must be counted"
+    assert len(snap["prefix_keys"]) == 2
+    assert len(snap["tail"]) == 2, "rows >= floor must be the bounded tail"
+    # the repeated prompt key appears in BOTH the skipped prefix and the tail —
+    # exactly the occurrence-count collision the guard must refuse
+    assert snap["prefix_keys"][0] == snap["tail_keys"][0]
