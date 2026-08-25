@@ -745,3 +745,127 @@ def test_regeneration_tail_snapshot_reads_real_sqlite(monkeypatch, tmp_path):
     # the repeated prompt key appears in BOTH the skipped prefix and the tail —
     # exactly the occurrence-count collision the guard must refuse
     assert snap["prefix_keys"][0] == snap["tail_keys"][0]
+
+
+def _make_state_db(tmp_path, rows, with_id=True):
+    """Create a real state.db with the given rows (list of dicts)."""
+    import sqlite3
+
+    db = tmp_path / "state.db"
+    conn = sqlite3.connect(db)
+    cols = ["session_id TEXT", "role TEXT", "content TEXT", "timestamp REAL",
+            "tool_calls TEXT", "tool_name TEXT", "reasoning TEXT", "active INTEGER"]
+    if with_id:
+        cols.append("id INTEGER PRIMARY KEY")
+    conn.execute(f"CREATE TABLE messages ({', '.join(cols)})")
+    for i, r in enumerate(rows):
+        conn.execute(
+            "INSERT INTO messages (session_id, role, content, timestamp, tool_calls, tool_name, reasoning, active) "
+            "VALUES (?,?,?,?,?,?,?,1)",
+            ("s1", r.get("role"), r.get("content"), r.get("timestamp"),
+             r.get("tool_calls"), r.get("tool_name"), r.get("reasoning")),
+        )
+    conn.commit()
+    conn.close()
+    return db
+
+
+def test_snapshot_tail_uses_canonical_projection(monkeypatch, tmp_path):
+    """#6826 r4 #1: the snapshot tail must use the SAME projection as the
+    canonical reader — JSON tool_calls decoded, tool_name → name, no raw
+    id/active exposure (tool-call/gateway-row sessions)."""
+    from api import models
+
+    db = _make_state_db(tmp_path, [
+        {"role": "user", "content": "p", "timestamp": 100.0},
+        {"role": "tool", "content": "result", "timestamp": 200.0,
+         "tool_calls": '[{"name": "x", "arguments": {"a": 1}}]',
+         "tool_name": "read_file", "reasoning": "r1"},
+        {"role": "assistant", "content": "a", "timestamp": 300.0},
+    ])
+    monkeypatch.setattr(models, "_active_state_db_path", lambda: db)
+    snap = models.get_state_db_regeneration_tail_snapshot("s1", 50.0)
+    assert snap is not None
+    tool = [m for m in snap["tail"] if m.get("role") == "tool"][0]
+    assert isinstance(tool["tool_calls"], list), "tool_calls must be JSON-decoded"
+    assert tool["name"] == "read_file", "tool_name → name must be applied"
+    assert "id" not in tool and "active" not in tool, "raw id/active must not leak"
+    assert "reasoning" in tool and tool["reasoning"] == "r1"
+
+
+def test_snapshot_uses_durable_id_order(monkeypatch, tmp_path):
+    """#6826 r4 #2: durable id ASC order (not timestamp) — a later-id user at
+    ts=600 followed by its assistant at ts=550 must stay user → assistant."""
+    from api import models
+
+    db = _make_state_db(tmp_path, [
+        {"role": "user", "content": "later user", "timestamp": 600.0},
+        {"role": "assistant", "content": "assistant 550", "timestamp": 550.0},
+    ])
+    monkeypatch.setattr(models, "_active_state_db_path", lambda: db)
+    snap = models.get_state_db_regeneration_tail_snapshot("s1", 50.0)
+    assert snap is not None
+    roles = [m.get("role") for m in snap["tail"]]
+    assert roles == ["user", "assistant"], f"durable id order violated: {roles}"
+
+
+class _FakeCursor:
+    def __init__(self, conn):
+        self._c = conn._real.cursor()
+        self._conn = conn
+        self._dv = None
+
+    def execute(self, sql, *args):
+        s = sql.strip()
+        if s.startswith("PRAGMA data_version"):
+            self._conn._dv_calls += 1
+            self._dv = 42 if self._conn._dv_calls == 1 else 43  # changed on 2nd read
+            return self
+        return self._c.execute(sql, *args)
+
+    def fetchone(self):
+        if self._dv is not None:
+            v, self._dv = self._dv, None
+            return (v,)
+        return self._c.fetchone()
+
+    def fetchall(self):
+        return self._c.fetchall()
+
+
+class _FakeConn:
+    def __init__(self, real):
+        self._real = real
+        self._dv_calls = 0
+        self.row_factory = None
+
+    def cursor(self):
+        return _FakeCursor(self)
+
+    def close(self):
+        self._real.close()
+
+    def __enter__(self):
+        return self
+
+    def __exit__(self, *a):
+        self.close()
+
+
+def test_snapshot_refuses_when_wal_data_version_changes(monkeypatch, tmp_path):
+    """#6826 r4 #3 (WAL TOCTOU): if PRAGMA data_version changes during the
+    proof (a concurrent WAL commit), the snapshot must return None so the
+    caller falls back to the full read."""
+    import sqlite3
+
+    from api import models
+
+    db = _make_state_db(tmp_path, [
+        {"role": "user", "content": "p", "timestamp": 100.0},
+        {"role": "assistant", "content": "a", "timestamp": 200.0},
+    ])
+    real_conn = sqlite3.connect(db)
+    fake = _FakeConn(real_conn)
+    monkeypatch.setattr(models, "open_state_db_readonly", lambda _p: fake)
+    snap = models.get_state_db_regeneration_tail_snapshot("s1", 50.0)
+    assert snap is None, "changed data_version must refuse the bounded snapshot"
