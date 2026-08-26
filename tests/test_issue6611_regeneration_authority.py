@@ -890,7 +890,6 @@ def test_in_tail_duplicate_guard_refuses_bounded_and_full_revision_accepted(monk
         regeneration_revision_for,
         regeneration_state,
     )
-    from api.streaming import _session_payload_with_full_messages
 
     # 212 rows (above the 200-row anchor budget); the user row at index 210
     # repeats the visible key of the user row at index 100 — a duplicate that
