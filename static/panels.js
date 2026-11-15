@@ -1937,7 +1937,6 @@ let _cronSelectedSkills=[];
 let _cronIsDuplicate = false;
 let _cronSkillsCache=null;
 let _cronProfilesCache=null;
-let _cronDeliveryOptionsCache=null;
 
 function openCronCreate(){
   if (typeof switchPanel === 'function' && _currentPanel !== 'tasks') switchPanel('tasks');
@@ -2072,7 +2071,7 @@ function _renderCronForm({ name, schedule, prompt, deliver, profile, toast_notif
         <div class="detail-form-row">
           <label for="cronFormDeliver">${esc(t('cron_deliver_label') || 'Deliver output to')}</label>
           <select id="cronFormDeliver">
-            <option value="" disabled>loading...</option>
+            <option value="${esc(deliver || 'local')}" selected>loading...</option>
           </select>
         </div>
         <div class="detail-form-row">
@@ -2122,29 +2121,35 @@ async function _populateCronDeliverOptions(selectedValue, isEdit) {
   var sel = $('cronFormDeliver');
   if (!sel) return;
   sel.disabled = true;
+  // #9058: the list depends on the active profile's enabled platform plugins, so it is
+  // fetched for every form instead of cached for the page (a profile switch does not reload).
+  var requestedProfile = S.activeProfile || 'default';
   try {
-    if (!_cronDeliveryOptionsCache) {
-      var res = await api('/api/crons/delivery-options');
-      _cronDeliveryOptionsCache = res && res.platforms ? res.platforms : [];
+    var res = await api('/api/crons/delivery-options');
+    if ($('cronFormDeliver') !== sel) return;  // this form was replaced; its successor fills itself
+    if ((S.activeProfile || 'default') !== requestedProfile) {
+      // The profile changed while the request was in flight: refill for the current one.
+      return _populateCronDeliverOptions(selectedValue, isEdit);
     }
+    var options = res && res.platforms ? res.platforms : [];
     sel.innerHTML = '';
-    for (var i = 0; i < _cronDeliveryOptionsCache.length; i++) {
-      var p = _cronDeliveryOptionsCache[i];
+    for (var i = 0; i < options.length; i++) {
+      var p = options[i];
       var opt = document.createElement('option');
       opt.value = p.value;
       opt.textContent = p.label;
       if (p.value === selectedValue) opt.selected = true;
       sel.appendChild(opt);
     }
-    if (selectedValue && !sel.querySelector('option[value="' + CSS.escape(selectedValue) + '"]')) {
-      var opt = document.createElement('option');
-      opt.value = selectedValue;
-      opt.textContent = selectedValue + ' *';
-      opt.selected = true;
-      sel.prepend(opt);
-    }
   } catch (e) {
     sel.innerHTML = '<option value="local">Local (save output only)</option>';
+  }
+  if (selectedValue && !sel.querySelector('option[value="' + CSS.escape(selectedValue) + '"]')) {
+    var opt = document.createElement('option');
+    opt.value = selectedValue;
+    opt.textContent = selectedValue + ' *';
+    opt.selected = true;
+    sel.prepend(opt);
   }
   sel.disabled = false;
 }
@@ -7233,6 +7238,26 @@ function _openProfileDropdownShell(){
 }
 
 async function _profileSwitchPanelLoad(){
+  _resetProfileScopedPanelState();
+  if (_currentPanel === 'skills') await loadSkills();
+  if (_currentPanel === 'memory') await loadMemory();
+  if (_currentPanel === 'tasks') await loadCrons();
+  if (_currentPanel === 'kanban') await loadKanban();
+  if (_currentPanel === 'profiles') await loadProfilesPanel();
+  if (_currentPanel === 'workspaces') await loadWorkspacesPanel();
+}
+
+// Synchronous half of the profile-switch panel reset: drops the previous
+// profile's Tasks state (detail, edit id, pre-form snapshot, duplicate flag,
+// cross-profile view) without any network. Shared by the canonical switch
+// (through _profileSwitchPanelLoad) and the session-load switch in
+// sessions.js (#9069), which must not leave a Duplicate/Edit form that would
+// write the previous profile's job under the new profile's cookie.
+function _resetProfileScopedPanelState(){
+  // Retire any loadCrons() still in flight for the previous profile (#6767
+  // latest-wins). With Tasks hidden no newer load supersedes it, and its reply
+  // would otherwise publish that profile's writable rows under this one.
+  ++_cronLoadGeneration;
   // Cross-profile cron visibility is an active-profile opt-in; never carry it
   // into the next profile when the Tasks panel wasn't the visible panel.
   _showAllCronProfiles = false;
@@ -7241,12 +7266,6 @@ async function _profileSwitchPanelLoad(){
   _editingCronId = null;
   _cronIsDuplicate = false;
   _clearCronDetail();
-  if (_currentPanel === 'skills') await loadSkills();
-  if (_currentPanel === 'memory') await loadMemory();
-  if (_currentPanel === 'tasks') await loadCrons();
-  if (_currentPanel === 'kanban') await loadKanban();
-  if (_currentPanel === 'profiles') await loadProfilesPanel();
-  if (_currentPanel === 'workspaces') await loadWorkspacesPanel();
 }
 
 // ── Tab-visibility reconciliation guard ────────────────────────────────────
